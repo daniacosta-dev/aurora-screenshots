@@ -1,0 +1,183 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <radialGradient id="bgGrad" cx="50%" cy="50%" r="70%">
+      <stop offset="0%" stop-color="#162550"/>
+      <stop offset="100%" stop-color="#0a1530"/>
+    </radialGradient>
+
+    <linearGradient id="aurora1" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%"   stop-color="#00e5ff" stop-opacity="0.0"/>
+      <stop offset="30%"  stop-color="#00e5ff" stop-opacity="0.85"/>
+      <stop offset="65%"  stop-color="#a855f7" stop-opacity="0.8"/>
+      <stop offset="100%" stop-color="#ec4899" stop-opacity="0.0"/>
+    </linearGradient>
+    <linearGradient id="aurora2" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%"   stop-color="#06b6d4" stop-opacity="0.0"/>
+      <stop offset="25%"  stop-color="#06b6d4" stop-opacity="0.65"/>
+      <stop offset="55%"  stop-color="#7c3aed" stop-opacity="0.85"/>
+      <stop offset="100%" stop-color="#f472b6" stop-opacity="0.0"/>
+    </linearGradient>
+    <linearGradient id="aurora3" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%"   stop-color="#00ffc8" stop-opacity="0.0"/>
+      <stop offset="40%"  stop-color="#00ffc8" stop-opacity="0.35"/>
+      <stop offset="70%"  stop-color="#818cf8" stop-opacity="0.45"/>
+      <stop offset="100%" stop-color="#818cf8" stop-opacity="0.0"/>
+    </linearGradient>
+
+    <linearGradient id="handleGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#00e5ff"/>
+      <stop offset="100%" stop-color="#c084fc"/>
+    </linearGradient>
+    <linearGradient id="penGrad" x1="0%" y1="100%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#c084fc"/>
+      <stop offset="100%" stop-color="#00e5ff"/>
+    </linearGradient>
+    <linearGradient id="clipGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#00e5ff"/>
+      <stop offset="100%" stop-color="#a855f7"/>
+    </linearGradient>
+
+    <filter id="auroraBlur">
+      <feGaussianBlur stdDeviation="7"/>
+    </filter>
+    <filter id="auroraBlur2">
+      <feGaussianBlur stdDeviation="13"/>
+    </filter>
+    <filter id="glow" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="4" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <filter id="softGlow" x="-60%" y="-60%" width="220%" height="220%">
+      <feGaussianBlur stdDeviation="6" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+
+    <clipPath id="roundClip">
+      <rect x="0" y="0" width="512" height="512" rx="96" ry="96"/>
+    </clipPath>
+  </defs>
+
+  <!-- Background -->
+  <rect x="0" y="0" width="512" height="512" rx="96" ry="96" fill="url(#bgGrad)"/>
+  <!-- White ring — makes icon visible on any dark tray background -->
+  <rect x="4" y="4" width="504" height="504" rx="94" ry="94"
+        fill="none" stroke="rgba(255,255,255,0.22)" stroke-width="10"/>
+
+  <g clip-path="url(#roundClip)">
+
+    <!-- Stars -->
+    <circle cx="55"  cy="48"  r="1.5" fill="white" opacity="0.75"/>
+    <circle cx="128" cy="32"  r="1"   fill="white" opacity="0.55"/>
+    <circle cx="198" cy="58"  r="1.5" fill="white" opacity="0.65"/>
+    <circle cx="288" cy="40"  r="1"   fill="white" opacity="0.50"/>
+    <circle cx="368" cy="65"  r="1.5" fill="white" opacity="0.85"/>
+    <circle cx="440" cy="36"  r="1"   fill="white" opacity="0.55"/>
+    <circle cx="480" cy="75"  r="1.5" fill="white" opacity="0.65"/>
+    <circle cx="94"  cy="95"  r="1"   fill="white" opacity="0.40"/>
+    <circle cx="420" cy="105" r="1.5" fill="white" opacity="0.45"/>
+    <circle cx="320" cy="85"  r="1"   fill="white" opacity="0.55"/>
+    <circle cx="160" cy="105" r="1"   fill="white" opacity="0.45"/>
+    <circle cx="50"  cy="135" r="1.5" fill="white" opacity="0.28"/>
+    <circle cx="470" cy="145" r="1"   fill="white" opacity="0.38"/>
+    <circle cx="348" cy="128" r="1"   fill="white" opacity="0.32"/>
+    <circle cx="74"  cy="170" r="1"   fill="white" opacity="0.28"/>
+    <circle cx="490" cy="210" r="1"   fill="white" opacity="0.22"/>
+    <circle cx="22"  cy="200" r="1"   fill="white" opacity="0.22"/>
+    <circle cx="255" cy="22"  r="1"   fill="white" opacity="0.45"/>
+    <circle cx="410" cy="180" r="1"   fill="white" opacity="0.20"/>
+
+    <!-- Aurora bands (centered vertically, no ground) -->
+    <ellipse cx="256" cy="420" rx="320" ry="60"
+             fill="url(#aurora3)" filter="url(#auroraBlur2)" opacity="0.65"/>
+    <ellipse cx="230" cy="360" rx="290" ry="40"
+             fill="url(#aurora2)" filter="url(#auroraBlur)" opacity="0.85"/>
+    <ellipse cx="262" cy="300" rx="272" ry="30"
+             fill="url(#aurora1)" filter="url(#auroraBlur)" opacity="1.0"/>
+
+    <!-- ── SCREEN SELECTOR RECTANGLE ── -->
+    <!-- Outer dim overlay suggestion (subtle) -->
+    <rect x="88" y="118" width="336" height="252" rx="10" fill="#000000" opacity="0.25"/>
+
+    <!-- Main selector rectangle with dashed border -->
+    <rect x="108" y="138" width="296" height="212" rx="8"
+          fill="#00e5ff" fill-opacity="0.05"
+          stroke="url(#handleGrad)" stroke-width="2.5"
+          stroke-dasharray="12,6"
+          filter="url(#glow)"/>
+
+    <!-- Corner handles — top-left -->
+    <path d="M108,162 L108,138 L132,138" fill="none" stroke="url(#handleGrad)"
+          stroke-width="7" stroke-linecap="round" stroke-linejoin="round"
+          filter="url(#softGlow)"/>
+    <!-- top-right -->
+    <path d="M380,138 L404,138 L404,162" fill="none" stroke="url(#handleGrad)"
+          stroke-width="7" stroke-linecap="round" stroke-linejoin="round"
+          filter="url(#softGlow)"/>
+    <!-- bottom-left -->
+    <path d="M108,326 L108,350 L132,350" fill="none" stroke="url(#handleGrad)"
+          stroke-width="7" stroke-linecap="round" stroke-linejoin="round"
+          filter="url(#softGlow)"/>
+    <!-- bottom-right -->
+    <path d="M380,350 L404,350 L404,326" fill="none" stroke="url(#handleGrad)"
+          stroke-width="7" stroke-linecap="round" stroke-linejoin="round"
+          filter="url(#softGlow)"/>
+
+    <!-- Crosshair center -->
+    <line x1="216" y1="244" x2="242" y2="244" stroke="#00e5ff" stroke-width="2"
+          filter="url(#glow)" stroke-linecap="round" opacity="0.9"/>
+    <line x1="270" y1="244" x2="296" y2="244" stroke="#00e5ff" stroke-width="2"
+          filter="url(#glow)" stroke-linecap="round" opacity="0.9"/>
+    <line x1="256" y1="210" x2="256" y2="232" stroke="#00e5ff" stroke-width="2"
+          filter="url(#glow)" stroke-linecap="round" opacity="0.9"/>
+    <line x1="256" y1="256" x2="256" y2="278" stroke="#00e5ff" stroke-width="2"
+          filter="url(#glow)" stroke-linecap="round" opacity="0.9"/>
+    <circle cx="256" cy="244" r="3.5" fill="#00e5ff" filter="url(#glow)" opacity="0.9"/>
+    <circle cx="256" cy="244" r="1.8" fill="white"/>
+
+    <!-- ── TOOLBAR PILL (bottom of selector) ── -->
+    <rect x="178" y="362" width="156" height="40" rx="20"
+          fill="#162550" opacity="0.92"
+          stroke="url(#handleGrad)" stroke-width="1.5"/>
+
+    <!-- Toolbar glow -->
+    <rect x="178" y="362" width="156" height="40" rx="20"
+          fill="none" stroke="url(#handleGrad)" stroke-width="1.5"
+          filter="url(#softGlow)" opacity="0.5"/>
+
+    <!-- CLIPBOARD ICON (left side of toolbar) -->
+    <g transform="translate(210, 382)" filter="url(#glow)">
+      <!-- clipboard body -->
+      <rect x="-11" y="-14" width="22" height="26" rx="3"
+            fill="none" stroke="url(#clipGrad)" stroke-width="2"/>
+      <!-- clipboard top clip -->
+      <rect x="-6" y="-18" width="12" height="7" rx="2"
+            fill="#0d1b3e" stroke="url(#clipGrad)" stroke-width="1.8"/>
+      <!-- clipboard lines -->
+      <line x1="-7" y1="-4" x2="7" y2="-4" stroke="url(#clipGrad)" stroke-width="1.5" stroke-linecap="round" opacity="0.8"/>
+      <line x1="-7" y1="2"  x2="7" y2="2"  stroke="url(#clipGrad)" stroke-width="1.5" stroke-linecap="round" opacity="0.6"/>
+      <line x1="-7" y1="8"  x2="4" y2="8"  stroke="url(#clipGrad)" stroke-width="1.5" stroke-linecap="round" opacity="0.4"/>
+    </g>
+
+    <!-- Divider -->
+    <line x1="256" y1="368" x2="256" y2="396" stroke="white" stroke-width="1" opacity="0.15"/>
+
+    <!-- PENCIL ICON (right side of toolbar) -->
+    <g transform="translate(302, 382) rotate(-38)" filter="url(#glow)">
+      <!-- pencil body -->
+      <rect x="-5" y="-16" width="10" height="22" rx="2.5" fill="url(#penGrad)"/>
+      <!-- pencil tip -->
+      <polygon points="-5,6 5,6 0,16" fill="#c084fc"/>
+      <!-- pencil tip point -->
+      <polygon points="-2,13 2,13 0,18" fill="white" opacity="0.9"/>
+      <!-- pencil eraser top -->
+      <rect x="-5" y="-22" width="10" height="7" rx="2.5" fill="#00e5ff" opacity="0.85"/>
+    </g>
+
+  </g>
+</svg>

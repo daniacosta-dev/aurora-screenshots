@@ -1,0 +1,61 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Aurora Screenshots",
+  "version": "0.1.0",
+  "identifier": "com.daniacosta.aurora-screenshots",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "capture-overlay",
+        "title": "Aurora Screenshots",
+        "fullscreen": false,
+        "width": 1920,
+        "height": 1080,
+        "x": 0,
+        "y": 0,
+        "transparent": true,
+        "decorations": false,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "visible": false,
+        "resizable": false,
+        "shadow": false
+      },
+      {
+        "label": "main",
+        "title": "Aurora Screenshots",
+        "width": 420,
+        "height": 650,
+        "visible": false,
+        "skipTaskbar": true,
+        "resizable": false,
+        "decorations": false,
+        "x": 0,
+        "y": 0
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "resources": {
+      "../public/aurora-screenshots-icon.svg": "aurora-screenshots-icon.svg"
+    },
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ]
+  }
+}

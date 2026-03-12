@@ -1,0 +1,19 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Permisos principales de Clippix",
+  "windows": ["*"],
+  "permissions": [
+    "core:default",
+    "core:window:allow-close",
+    "core:window:allow-start-dragging",
+    "opener:default",
+    "global-shortcut:allow-is-registered",
+    "global-shortcut:allow-register",
+    "global-shortcut:allow-unregister",
+    "clipboard-manager:allow-read-text",
+    "clipboard-manager:allow-write-text",
+    "clipboard-manager:allow-read-image",
+    "clipboard-manager:allow-write-image"
+  ]
+}
