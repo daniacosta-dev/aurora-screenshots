@@ -1,8 +1,8 @@
 [package]
 name = "aurora-screenshots"
-version = "0.2.0"
+version = "0.3.0"
 description = "Aurora Screenshots — clipboard manager and screen capture"
-authors = ["you"]
+authors = ["Dani Acosta"]
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
