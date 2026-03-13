@@ -14,6 +14,8 @@ dist-ssr
 Claude.md
 .claude
 release
+aurora-screenshots_0.3.0_amd64.snap
+aurora-screenshots.desktop
 
 # Editor directories and files
 .vscode/*

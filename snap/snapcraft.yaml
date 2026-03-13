@@ -1,0 +1,112 @@
+name: aurora-screenshots
+base: core22
+version: "0.3.0"
+summary: Linux clipboard manager & annotated screenshot tool
+description: |
+  Aurora Screenshots unifies clipboard history and annotated screenshot
+  capture for Linux.
+
+  Press Ctrl+Shift+S to open a fullscreen capture overlay, drag to select
+  any region across one or multiple monitors, annotate with arrows, text,
+  blur, numbered bubbles, pixel ruler, and more — then copy to clipboard
+  instantly.
+
+  Features:
+  - Area screenshot capture with annotation editor
+  - Numbered bubble indicators and keyboard shortcuts for tools
+  - Resizable selection with 8 resize handles
+  - Right-click floating color picker
+  - Persistent clipboard history with thumbnails
+  - Pin screenshots always-on-top
+  - Save captures as PNG
+  - System tray with global shortcut (Ctrl+Shift+S)
+  - X11 and Wayland support
+  - Multi-monitor support
+
+# classic confinement is required because:
+#   - WebKitGTK subprocess model conflicts with strict AppArmor profiles
+#   - X11 keyboard/pointer grabs for the fullscreen overlay
+#   - Screenshot access across the full display
+# Request for classic will be reviewed by the Snapcraft team.
+grade: stable
+confinement: classic
+compression: lzo
+
+architectures:
+  - build-on: amd64
+    build-for: amd64
+
+parts:
+  aurora-screenshots:
+    plugin: nil
+    source: .
+    build-packages:
+      - pkg-config
+      - build-essential
+      - curl
+      - libwebkit2gtk-4.1-dev
+      - libgtk-3-dev
+      - libayatana-appindicator3-dev
+      - librsvg2-dev
+      - libssl-dev
+      - libxdo-dev
+      - libx11-xcb-dev
+      - libxcb1-dev
+    stage-packages:
+      - libwebkit2gtk-4.1-0
+      - libgtk-3-0
+      - libayatana-appindicator3-1
+      - librsvg2-2
+      - libssl3
+      - libxdo3
+      - libx11-6
+      - libxcb1
+      - glib-networking
+      - libglib2.0-0
+      - libjavascriptcoregtk-4.1-0
+      - libsoup-3.0-0
+    override-build: |
+      set -eux
+
+      # ── Node.js 20 ───────────────────────────────────────────────────────
+      curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+      apt-get install -y nodejs
+
+      # ── Rust (stable) ────────────────────────────────────────────────────
+      if ! command -v cargo &>/dev/null; then
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+          | sh -s -- -y --default-toolchain stable --no-modify-path
+      fi
+      export PATH="$HOME/.cargo/bin:$PATH"
+
+      # ── Frontend ─────────────────────────────────────────────────────────
+      npm ci
+      npm run build
+
+      # ── Tauri binary ─────────────────────────────────────────────────────
+      cargo build --release --manifest-path src-tauri/Cargo.toml
+
+      # ── Install ──────────────────────────────────────────────────────────
+      install -Dm755 src-tauri/target/release/aurora-screenshots \
+        "$SNAPCRAFT_PART_INSTALL/bin/aurora-screenshots"
+
+      install -Dm644 public/aurora-screenshots-icon.svg \
+        "$SNAPCRAFT_PART_INSTALL/share/icons/hicolor/scalable/apps/aurora-screenshots.svg"
+
+      install -Dm644 src-tauri/icons/128x128.png \
+        "$SNAPCRAFT_PART_INSTALL/share/icons/hicolor/128x128/apps/aurora-screenshots.png"
+
+      install -Dm644 snap/gui/aurora-screenshots.desktop \
+        "$SNAPCRAFT_PART_INSTALL/share/applications/aurora-screenshots.desktop"
+
+apps:
+  aurora-screenshots:
+    command: bin/aurora-screenshots
+    desktop: share/applications/aurora-screenshots.desktop
+    environment:
+      # Required for WebKitGTK to run inside the snap environment.
+      # WebKit's internal sandbox conflicts with the snap AppArmor profile.
+      WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS: "1"
+      # Prefer X11 backend; fall back to Wayland via XWayland
+      GDK_BACKEND: "x11,wayland"
+      XDG_DATA_DIRS: "$SNAP/share:$XDG_DATA_DIRS"
