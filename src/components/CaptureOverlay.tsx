@@ -6,7 +6,7 @@ import { listen } from "@tauri-apps/api/event";
 // ── Types ──────────────────────────────────────────────────────────────────
 
 type Phase = "idle" | "drawing" | "annotating";
-type Tool = "arrow" | "rect" | "marker" | "text" | "blur";
+type Tool = "arrow" | "rect" | "circle" | "marker" | "text" | "blur" | "bubble" | "ruler";
 
 interface Pt {
   x: number;
@@ -16,9 +16,12 @@ interface Pt {
 type Annotation =
   | { kind: "arrow"; from: Pt; to: Pt; color: string; size: number }
   | { kind: "rect"; x: number; y: number; w: number; h: number; color: string; size: number }
+  | { kind: "circle"; x: number; y: number; w: number; h: number; color: string; size: number }
   | { kind: "marker"; points: Pt[]; color: string; size: number }
   | { kind: "text"; x: number; y: number; text: string; color: string; size: number }
-  | { kind: "blur"; x: number; y: number; w: number; h: number };
+  | { kind: "blur"; x: number; y: number; w: number; h: number }
+  | { kind: "bubble"; x: number; y: number; n: number; color: string; size: number }
+  | { kind: "ruler"; from: Pt; to: Pt; color: string };
 
 // ── Resize handles ────────────────────────────────────────────────────────
 
@@ -216,13 +219,99 @@ function drawBlurAnnotation(
   }
 }
 
-function drawAnnotation(ctx: CanvasRenderingContext2D, ann: Annotation) {
+function drawCircleAnnotation(
+  ctx: CanvasRenderingContext2D,
+  x: number, y: number, w: number, h: number,
+  color: string, size: number
+) {
+  if (Math.abs(w) < 2 || Math.abs(h) < 2) return;
+  ctx.save();
+  ctx.strokeStyle = color;
+  ctx.lineWidth = size;
+  ctx.beginPath();
+  ctx.ellipse(x + w / 2, y + h / 2, Math.abs(w / 2), Math.abs(h / 2), 0, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawBubble(
+  ctx: CanvasRenderingContext2D,
+  x: number, y: number, n: number,
+  color: string, size: number
+) {
+  const r = 12 + size * 2;
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(x, y, r, 0, Math.PI * 2);
+  ctx.fillStyle = color;
+  ctx.fill();
+  ctx.fillStyle = "#fff";
+  ctx.font = `bold ${10 + size * 2}px sans-serif`;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText(String(n), x, y);
+  ctx.restore();
+}
+
+function drawRulerAnnotation(
+  ctx: CanvasRenderingContext2D,
+  from: Pt, to: Pt, color: string, dpr: number
+) {
+  const dx = to.x - from.x;
+  const dy = to.y - from.y;
+  const dist = Math.sqrt(dx * dx + dy * dy);
+  if (dist < 2) return;
+  const angle = Math.atan2(dy, dx);
+  const perp = angle + Math.PI / 2;
+  const tickLen = 6;
+
+  ctx.save();
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 1.5;
+  ctx.setLineDash([5, 4]);
+  ctx.beginPath();
+  ctx.moveTo(from.x, from.y);
+  ctx.lineTo(to.x, to.y);
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  // End ticks
+  for (const pt of [from, to]) {
+    ctx.beginPath();
+    ctx.moveTo(pt.x + Math.cos(perp) * tickLen, pt.y + Math.sin(perp) * tickLen);
+    ctx.lineTo(pt.x - Math.cos(perp) * tickLen, pt.y - Math.sin(perp) * tickLen);
+    ctx.stroke();
+  }
+
+  // Distance label
+  const physDist = Math.round(dist * dpr);
+  const label = `${physDist} px`;
+  const mx = (from.x + to.x) / 2;
+  const my = (from.y + to.y) / 2;
+  ctx.font = "bold 11px monospace";
+  const tw = ctx.measureText(label).width + 12;
+  const th = 18;
+  ctx.fillStyle = "rgba(0,0,0,0.78)";
+  ctx.beginPath();
+  ctx.roundRect(mx - tw / 2, my - th / 2, tw, th, 4);
+  ctx.fill();
+  ctx.fillStyle = color;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText(label, mx, my);
+  ctx.restore();
+}
+
+function drawAnnotation(ctx: CanvasRenderingContext2D, ann: Annotation, dpr = 1) {
   switch (ann.kind) {
     case "arrow":
       drawArrow(ctx, ann.from, ann.to, ann.color, ann.size);
       break;
     case "rect":
       drawRectAnnotation(ctx, ann.x, ann.y, ann.w, ann.h, ann.color, ann.size);
+      break;
+    case "circle":
+      drawCircleAnnotation(ctx, ann.x, ann.y, ann.w, ann.h, ann.color, ann.size);
       break;
     case "marker":
       drawMarker(ctx, ann.points, ann.color, ann.size);
@@ -232,6 +321,12 @@ function drawAnnotation(ctx: CanvasRenderingContext2D, ann: Annotation) {
       break;
     case "blur":
       drawBlurAnnotation(ctx, ann.x, ann.y, ann.w, ann.h);
+      break;
+    case "bubble":
+      drawBubble(ctx, ann.x, ann.y, ann.n, ann.color, ann.size);
+      break;
+    case "ruler":
+      drawRulerAnnotation(ctx, ann.from, ann.to, ann.color, dpr);
       break;
   }
 }
@@ -304,18 +399,36 @@ function ColorPicker({
       {/* Swatch botón */}
       <button
         onClick={() => setOpen((o) => !o)}
-        title="Color"
+        title="Custom color"
         style={{
-          width: 22,
-          height: 22,
-          borderRadius: 4,
-          background: value,
-          border: open ? "2px solid #fff" : "1px solid rgba(255,255,255,0.35)",
+          width: 30,
+          height: 30,
+          borderRadius: 6,
+          background: open ? "rgba(255,255,255,0.12)" : "transparent",
+          border: open ? "1px solid rgba(255,255,255,0.5)" : "1px solid transparent",
           cursor: "pointer",
           padding: 0,
           flexShrink: 0,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          gap: 3,
         }}
-      />
+      >
+        {/* Color swatch + pencil icon */}
+        <span style={{
+          width: 12,
+          height: 12,
+          borderRadius: 3,
+          background: value,
+          border: "1.5px solid rgba(255,255,255,0.4)",
+          display: "inline-block",
+          flexShrink: 0,
+        }} />
+        <svg width="11" height="11" viewBox="0 0 12 12" fill="none" stroke="#e5e7eb" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M8.5 1.5l2 2-6 6H2.5v-2l6-6z"/>
+        </svg>
+      </button>
       {/* Popover */}
       {open && (
         <div
@@ -506,10 +619,10 @@ function CaptureOverlay() {
       ctx.rect(sx, sy, sw, sh);
       ctx.clip();
       for (const ann of annotationsRef.current) {
-        drawAnnotation(ctx, ann);
+        drawAnnotation(ctx, ann, dpr);
       }
       if (currentAnnRef.current) {
-        drawAnnotation(ctx, currentAnnRef.current);
+        drawAnnotation(ctx, currentAnnRef.current, dpr);
       }
       ctx.restore();
       // Selection border (dashed green)
@@ -610,7 +723,7 @@ function CaptureOverlay() {
     ctx.scale(dpr, dpr);
     ctx.translate(-sx, -sy);
     for (const ann of annotationsRef.current) {
-      drawAnnotation(ctx, ann);
+      drawAnnotation(ctx, ann, dpr);
     }
     ctx.restore();
 
@@ -626,9 +739,6 @@ function CaptureOverlay() {
     for (let i = 0; i < bytes.byteLength; i++) binary += String.fromCharCode(bytes[i]);
     const base64 = btoa(binary);
 
-    // Limpiar canvas ANTES de ocultar el overlay para que el compositor GTK capture
-    // el estado limpio. Sin esto, en la próxima captura se ve brevemente el frame
-    // anterior (con anotaciones) hasta que background-ready actualiza el fondo.
     reset();
     await new Promise<void>((r) => requestAnimationFrame(() => r()));
 
@@ -678,7 +788,7 @@ function CaptureOverlay() {
     ctx.save();
     ctx.scale(dpr, dpr);
     ctx.translate(-sx, -sy);
-    for (const ann of annotationsRef.current) drawAnnotation(ctx, ann);
+    for (const ann of annotationsRef.current) drawAnnotation(ctx, ann, dpr);
     ctx.restore();
 
     const blob = await new Promise<Blob | null>((resolve) => offscreen.toBlob(resolve, "image/png"));
@@ -872,6 +982,15 @@ function CaptureOverlay() {
         draw();
         return;
       }
+      // Bubble: place immediately on click, no drag
+      if (activeTool === "bubble") {
+        const n = annotationsRef.current.filter((a) => a.kind === "bubble").length + 1;
+        annotationsRef.current = [...annotationsRef.current, { kind: "bubble", x: pos.x, y: pos.y, n, color: strokeColor, size: strokeSize }];
+        setAnnCount(annotationsRef.current.length);
+        draw();
+        return;
+      }
+
       // Start annotation drag
       isDraggingAnn.current = true;
       switch (activeTool) {
@@ -881,11 +1000,17 @@ function CaptureOverlay() {
         case "rect":
           currentAnnRef.current = { kind: "rect", x: pos.x, y: pos.y, w: 0, h: 0, color: strokeColor, size: strokeSize };
           break;
+        case "circle":
+          currentAnnRef.current = { kind: "circle", x: pos.x, y: pos.y, w: 0, h: 0, color: strokeColor, size: strokeSize };
+          break;
         case "marker":
           currentAnnRef.current = { kind: "marker", points: [pos], color: strokeColor, size: strokeSize };
           break;
         case "blur":
           currentAnnRef.current = { kind: "blur", x: pos.x, y: pos.y, w: 0, h: 0 };
+          break;
+        case "ruler":
+          currentAnnRef.current = { kind: "ruler", from: pos, to: pos, color: strokeColor };
           break;
       }
       draw();
@@ -921,14 +1046,36 @@ function CaptureOverlay() {
         case "arrow":
           currentAnnRef.current = { ...ann, to: pos };
           break;
-        case "rect":
-          currentAnnRef.current = { ...ann, w: pos.x - ann.x, h: pos.y - ann.y };
+        case "rect": {
+          let w = pos.x - ann.x;
+          let h = pos.y - ann.y;
+          if (e.ctrlKey) {
+            const side = Math.min(Math.abs(w), Math.abs(h));
+            w = Math.sign(w) * side;
+            h = Math.sign(h) * side;
+          }
+          currentAnnRef.current = { ...ann, w, h };
           break;
+        }
+        case "circle": {
+          let w = pos.x - ann.x;
+          let h = pos.y - ann.y;
+          if (e.ctrlKey) {
+            const side = Math.min(Math.abs(w), Math.abs(h));
+            w = Math.sign(w) * side;
+            h = Math.sign(h) * side;
+          }
+          currentAnnRef.current = { ...ann, w, h };
+          break;
+        }
         case "marker":
           currentAnnRef.current = { ...ann, points: [...ann.points, pos] };
           break;
         case "blur":
           currentAnnRef.current = { ...ann, w: pos.x - ann.x, h: pos.y - ann.y };
+          break;
+        case "ruler":
+          currentAnnRef.current = { ...ann, to: pos };
           break;
       }
       draw();
@@ -950,19 +1097,26 @@ function CaptureOverlay() {
 
       // Normalize and validate before committing
       let finalAnn: Annotation | null = ann;
-      if (ann.kind === "rect" || ann.kind === "blur") {
+      if (ann.kind === "rect" || ann.kind === "blur" || ann.kind === "circle") {
         const nx = Math.min(ann.x, ann.x + ann.w);
         const ny = Math.min(ann.y, ann.y + ann.h);
         const nw = Math.abs(ann.w);
         const nh = Math.abs(ann.h);
         if (nw < 3 || nh < 3) {
           finalAnn = null;
+        } else if (ann.kind === "rect") {
+          finalAnn = { ...ann, x: nx, y: ny, w: nw, h: nh };
+        } else if (ann.kind === "circle") {
+          finalAnn = { ...ann, x: nx, y: ny, w: nw, h: nh };
         } else {
-          finalAnn = ann.kind === "rect"
-            ? { ...ann, x: nx, y: ny, w: nw, h: nh }
-            : { kind: "blur", x: nx, y: ny, w: nw, h: nh };
+          finalAnn = { kind: "blur", x: nx, y: ny, w: nw, h: nh };
         }
       } else if (ann.kind === "arrow") {
+        finalAnn = { ...ann, to: pos };
+        const dx = pos.x - ann.from.x;
+        const dy = pos.y - ann.from.y;
+        if (Math.sqrt(dx * dx + dy * dy) < 5) finalAnn = null;
+      } else if (ann.kind === "ruler") {
         finalAnn = { ...ann, to: pos };
         const dx = pos.x - ann.from.x;
         const dy = pos.y - ann.from.y;
@@ -1016,7 +1170,7 @@ function CaptureOverlay() {
   const getToolbarStyle = (): React.CSSProperties => {
     const { sx, sy, sw, sh } = getSelRect(startPos.current, endPos.current);
     const W = window.innerWidth;
-    const TOOLBAR_W = 470;
+    const TOOLBAR_W = 680;
     const TOOLBAR_H = 50;
     const spaceBelow = window.innerHeight - (sy + sh);
     const top = spaceBelow > TOOLBAR_H + 12 ? sy + sh + 8 : sy - TOOLBAR_H - 8;
@@ -1024,13 +1178,22 @@ function CaptureOverlay() {
     return { top, left, width: TOOLBAR_W };
   };
 
+  const getSelectionSize = () => {
+    const { sw, sh } = getSelRect(startPos.current, endPos.current);
+    const dpr = window.devicePixelRatio || 1;
+    return `${Math.round(sw * dpr)} × ${Math.round(sh * dpr)} px`;
+  };
+
   // ── Render ────────────────────────────────────────────────────────────
   const toolDefs: { tool: Tool; label: string; title: string }[] = [
     { tool: "arrow", label: "→", title: "Arrow" },
-    { tool: "rect", label: "□", title: "Rectangle" },
+    { tool: "rect", label: "□", title: "Rectangle (Ctrl=square)" },
+    { tool: "circle", label: "○", title: "Circle (Ctrl=perfect)" },
     { tool: "marker", label: "~", title: "Marker" },
     { tool: "text", label: "T", title: "Text" },
     { tool: "blur", label: "◌", title: "Blur" },
+    { tool: "bubble", label: "①", title: "Numbered bubble" },
+    { tool: "ruler", label: "ruler-svg", title: "Ruler (measure px)" },
   ];
 
   return (
@@ -1096,7 +1259,17 @@ function CaptureOverlay() {
                 fontWeight: "bold",
               }}
             >
-              {label}
+              {label === "ruler-svg" ? (
+                <svg width="17" height="17" viewBox="0 0 17 17" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round">
+                  {/* Ruler body */}
+                  <rect x="1" y="5.5" width="15" height="6" rx="1.2" stroke="currentColor" strokeWidth="1.3" fill="none"/>
+                  {/* Tick marks */}
+                  <line x1="4" y1="5.5" x2="4" y2="8"/>
+                  <line x1="7" y1="5.5" x2="7" y2="9.5"/>
+                  <line x1="10" y1="5.5" x2="10" y2="8"/>
+                  <line x1="13" y1="5.5" x2="13" y2="9.5"/>
+                </svg>
+              ) : label}
             </button>
           ))}
 
@@ -1234,6 +1407,21 @@ function CaptureOverlay() {
           >
             Esc
           </button>
+
+          <div style={{ width: 1, height: 22, background: "rgba(255,255,255,0.12)", margin: "0 3px" }} />
+
+          {/* Selection size */}
+          <span
+            style={{
+              color: "#9ca3af",
+              fontSize: 10,
+              fontFamily: "monospace",
+              whiteSpace: "nowrap",
+              userSelect: "none",
+            }}
+          >
+            {getSelectionSize()}
+          </span>
         </div>
       )}
 
@@ -1299,6 +1487,7 @@ function CaptureOverlay() {
           <span style={{ color: "#6b7280" }}>ESC cancel</span>
         </div>
       )}
+
     </div>
   );
 }

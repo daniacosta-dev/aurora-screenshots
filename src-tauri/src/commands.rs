@@ -348,6 +348,21 @@ pub fn finalize_annotated_capture(
     }
 
     let _ = app.emit("history-updated", ());
+
+    // Notificación del sistema via notify-send
+    tauri::async_runtime::spawn(async {
+        let _ = tokio::process::Command::new("notify-send")
+            .args([
+                "--app-name=Aurora Screenshots",
+                "--icon=aurora-screenshots",
+                "--expire-time=3000",
+                "Aurora Screenshots",
+                "Screenshot copied to clipboard",
+            ])
+            .status()
+            .await;
+    });
+
     Ok(())
 }
 
