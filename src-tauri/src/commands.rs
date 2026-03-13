@@ -86,8 +86,41 @@ pub(crate) fn show_capture_overlay(app: &tauri::AppHandle) {
                     };
                 }
 
-                if let Some(overlay) = app.get_webview_window("capture-overlay") {
-                    let _ = overlay.set_position(tauri::Position::Physical(
+                // Obtener la ventana overlay existente, o crear una nueva si fue cerrada (ESC).
+                let overlay = match app.get_webview_window("capture-overlay") {
+                    Some(w) => w,
+                    None => {
+                        // La ventana fue cerrada — el XID almacenado ya no es válido.
+                        {
+                            let state = app.state::<AppState>();
+                            if let Ok(mut xid) = state.overlay_xid.lock() { *xid = None; };
+                        }
+                        match tauri::WebviewWindowBuilder::new(
+                            &app,
+                            "capture-overlay",
+                            tauri::WebviewUrl::App("index.html".into()),
+                        )
+                        .transparent(true)
+                        .decorations(false)
+                        .always_on_top(true)
+                        .skip_taskbar(true)
+                        .visible(false)
+                        .resizable(false)
+                        .inner_size(1920.0, 1080.0)
+                        .build() {
+                            Ok(w) => {
+                                // Esperar a que GTK realice la ventana antes de usarla.
+                                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                                w
+                            }
+                            Err(e) => {
+                                eprintln!("[show_overlay] failed to create overlay window: {e}");
+                                return;
+                            }
+                        }
+                    }
+                };
+                let _ = overlay.set_position(tauri::Position::Physical(
                         tauri::PhysicalPosition::new(min_x, min_y),
                     ));
                     let _ = overlay.set_size(tauri::Size::Physical(
@@ -167,15 +200,18 @@ pub(crate) fn show_capture_overlay(app: &tauri::AppHandle) {
 
                     #[cfg(target_os = "linux")]
                     if let Some(xid) = xid {
+                        let overlay_grab = overlay.clone();
                         tokio::task::spawn_blocking(move || {
                             if let Err(e) = crate::x11_grab::setup_and_grab(xid) {
                                 eprintln!("[show_overlay] setup_and_grab error: {e}");
                             }
+                            // set_focus() DESPUÉS del grab: GTK recibe el FocusIn ya con
+                            // el grab activo, evitando el bug de "primer teclazo da foco,
+                            // segundo ejecuta la acción".
+                            let _ = overlay_grab.set_focus();
+                            let _ = overlay_grab.emit("grab-ready", ());
                         });
                     }
-                } else {
-                    eprintln!("[show_overlay] could not get capture-overlay window");
-                }
             }
 
             capture::DisplayServer::Wayland => {
@@ -296,6 +332,28 @@ pub fn hide_capture_overlay(app: tauri::AppHandle) -> Result<(), String> {
     }
     if let Some(overlay) = app.get_webview_window("capture-overlay") {
         let _ = overlay.hide();
+    }
+    Ok(())
+}
+
+/// Cierra (destruye) el overlay de captura desde el frontend.
+/// Úsalo en ESC para que la próxima captura arranque con una ventana WebKit limpia,
+/// evitando el bug de "primer teclazo da foco, segundo ejecuta la acción".
+#[tauri::command]
+pub fn close_capture_overlay(state: State<AppState>, app: tauri::AppHandle) -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    {
+        if let Err(e) = crate::x11_grab::ungrab_input() {
+            eprintln!("ungrab_input: {e}");
+        }
+        // Invalida el XID almacenado — la nueva ventana tendrá uno distinto.
+        if let Ok(mut xid) = state.overlay_xid.lock() {
+            *xid = None;
+        }
+    }
+    let _ = &state; // evita warning de unused en non-linux
+    if let Some(overlay) = app.get_webview_window("capture-overlay") {
+        let _ = overlay.close();
     }
     Ok(())
 }

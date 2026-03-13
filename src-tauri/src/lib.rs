@@ -74,6 +74,7 @@ pub fn run() {
             commands::get_desktop_background,
             commands::finalize_annotated_capture,
             commands::hide_capture_overlay,
+            commands::close_capture_overlay,
             commands::hide_main_window,
             commands::pin_screenshot,
             commands::get_pin_image,

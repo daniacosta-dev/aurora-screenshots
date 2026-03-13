@@ -759,6 +759,16 @@ function CaptureOverlay() {
     }
   }, []);
 
+  // Cerrar (destruir) el overlay — usado en ESC para que la próxima captura
+  // arranque con una ventana WebKit limpia, sin bugs de foco.
+  const closeOverlay = useCallback(async () => {
+    try {
+      await invoke("close_capture_overlay");
+    } catch {
+      await getCurrentWindow().close();
+    }
+  }, []);
+
   // ── Export annotated capture ───────────────────────────────────────────
   const exportCapture = useCallback(async () => {
     const { sx, sy, sw, sh } = getSelRect(startPos.current, endPos.current);
@@ -970,17 +980,22 @@ function CaptureOverlay() {
       loadBackground();
     }).then((fn) => { unlistenBg = fn; });
 
+    // El grab X11 se establece ~80ms después del show(). Cuando termina, emite
+    // "grab-ready" y re-solicitamos foco a WebKit para evitar el bug donde el
+    // primer teclazo solo activa el foco y el segundo ejecuta la acción.
+    let unlistenGrab: (() => void) | null = null;
+    listen("grab-ready", async () => {
+      await getCurrentWindow().setFocus();
+    }).then((fn) => { unlistenGrab = fn; });
+
     const onKeydown = async (e: KeyboardEvent) => {
       console.log("[overlay] keydown:", e.key, "ctrl:", e.ctrlKey, "phase:", phase.current, "hasFocus:", document.hasFocus());
       // Dejar que el input de texto maneje sus propias teclas
       if (textInputRef.current && document.activeElement === textInputRef.current) return;
 
       if (e.key === "Escape") {
-        if (phase.current === "idle") {
-          await hideOverlay();
-        } else {
-          reset();
-        }
+        reset();
+        await closeOverlay();
         return;
       }
 
@@ -1025,11 +1040,17 @@ function CaptureOverlay() {
       window.removeEventListener("blur", onBlur);
       window.removeEventListener("keydown", onKeydown);
       if (unlistenBg) unlistenBg();
+      if (unlistenGrab) unlistenGrab();
     };
-  }, [reset, draw, initCanvas, loadBackground, exportCapture, exportFullDesktop, pinCapture, hideOverlay]);
+  }, [reset, draw, initCanvas, loadBackground, exportCapture, exportFullDesktop, pinCapture, hideOverlay, closeOverlay]);
 
   // ── Mouse handlers ────────────────────────────────────────────────────
   const onMouseDown = (e: React.MouseEvent) => {
+    if (e.button === 2) {
+      reset();
+      void closeOverlay();
+      return;
+    }
     if (e.button !== 0) return;
     const pos = { x: e.clientX, y: e.clientY };
 
@@ -1449,6 +1470,7 @@ function CaptureOverlay() {
   return (
     <div
       style={{ position: "fixed", inset: 0, overflow: "hidden", userSelect: "none" }}
+      onContextMenu={(e) => e.preventDefault()}
       onMouseDown={(e) => {
         // Commitear texto al hacer clic fuera del input
         if (textInput && textInputRef.current && !textInputRef.current.contains(e.target as Node)) {
@@ -1702,7 +1724,7 @@ function CaptureOverlay() {
 
             {/* Esc */}
             <button
-              onClick={async () => { reset(); await hideOverlay(); }}
+              onClick={async () => { reset(); await closeOverlay(); }}
               title="Cancel (Esc)"
               style={{
                 background: "transparent",
