@@ -22,7 +22,7 @@ type Annotation =
   | { kind: "marker"; points: Pt[]; color: string; size: number }
   | { kind: "text"; x: number; y: number; text: string; color: string; size: number }
   | { kind: "blur"; x: number; y: number; w: number; h: number }
-  | { kind: "bubble"; x: number; y: number; n: number; color: string; size: number }
+  | { kind: "bubble"; x: number; y: number; n: number; color: string; size: number; tail?: Pt }
   | { kind: "highlight"; points: Pt[]; color: string; size: number }
   | { kind: "invert"; x: number; y: number; w: number; h: number }
   | { kind: "ruler"; from: Pt; to: Pt; color: string };
@@ -241,10 +241,27 @@ function drawCircleAnnotation(
 function drawBubble(
   ctx: CanvasRenderingContext2D,
   x: number, y: number, n: number,
-  color: string, size: number
+  color: string, size: number, tail?: Pt
 ) {
   const r = 12 + size * 2;
   ctx.save();
+  // Cono desde el borde de la burbuja hacia el punto señalado
+  if (tail) {
+    const dx = tail.x - x;
+    const dy = tail.y - y;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    if (dist > r) {
+      const angle = Math.atan2(dy, dx);
+      const wing = Math.PI / 7; // ~26°
+      ctx.beginPath();
+      ctx.moveTo(x + r * Math.cos(angle + wing), y + r * Math.sin(angle + wing));
+      ctx.lineTo(tail.x, tail.y);
+      ctx.lineTo(x + r * Math.cos(angle - wing), y + r * Math.sin(angle - wing));
+      ctx.closePath();
+      ctx.fillStyle = color;
+      ctx.fill();
+    }
+  }
   ctx.beginPath();
   ctx.arc(x, y, r, 0, Math.PI * 2);
   ctx.fillStyle = color;
@@ -380,7 +397,7 @@ function drawAnnotation(ctx: CanvasRenderingContext2D, ann: Annotation, dpr = 1)
       drawInvertAnnotation(ctx, ann.x, ann.y, ann.w, ann.h);
       break;
     case "bubble":
-      drawBubble(ctx, ann.x, ann.y, ann.n, ann.color, ann.size);
+      drawBubble(ctx, ann.x, ann.y, ann.n, ann.color, ann.size, ann.tail);
       break;
     case "ruler":
       drawRulerAnnotation(ctx, ann.from, ann.to, ann.color, dpr);
@@ -626,7 +643,7 @@ function CaptureOverlay() {
     const p = phase.current;
 
     if (p === "idle") {
-      ctx.fillStyle = "rgba(0,0,0,0.25)";
+      ctx.fillStyle = "rgba(0,0,0,0.5)";
       ctx.fillRect(0, 0, W, H);
       return;
     }
@@ -660,8 +677,8 @@ function CaptureOverlay() {
     }
 
     if (p === "annotating") {
-      // Subtle vignette outside selection
-      ctx.fillStyle = "rgba(0,0,0,0.38)";
+      // Same opacity as idle/drawing — sin parpadeo al transicionar entre fases
+      ctx.fillStyle = "rgba(0,0,0,0.5)";
       ctx.fillRect(0, 0, W, H);
       // Reveal and redraw bg in selection
       ctx.clearRect(sx, sy, sw, sh);
@@ -983,6 +1000,22 @@ function CaptureOverlay() {
         } else if (phase.current === "idle") {
           await exportFullDesktop();
         }
+        return;
+      }
+
+      // Atajos de herramientas (solo en fase de anotación, sin modificadores)
+      if (phase.current === "annotating" && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        const toolMap: Record<string, Tool> = {
+          a: "arrow", s: "rect", c: "circle", p: "marker",
+          h: "highlight", t: "text", b: "blur", i: "invert",
+          n: "bubble", l: "ruler",
+        };
+        const tool = toolMap[e.key.toLowerCase()];
+        if (tool) {
+          e.preventDefault();
+          setActiveTool((prev) => (prev === tool ? null : tool));
+          return;
+        }
       }
     };
 
@@ -1063,6 +1096,43 @@ function CaptureOverlay() {
         return;
       }
       if (activeTool === null) {
+        // Detectar click sobre una burbuja existente para moverla
+        let bubbleIdx = -1;
+        for (let i = annotationsRef.current.length - 1; i >= 0; i--) {
+          const a = annotationsRef.current[i];
+          if (a.kind === "bubble") {
+            const r = 12 + a.size * 2;
+            if (Math.sqrt((pos.x - a.x) ** 2 + (pos.y - a.y) ** 2) <= r) {
+              bubbleIdx = i;
+              break;
+            }
+          }
+        }
+        if (bubbleIdx >= 0) {
+          if (canvasRef.current) canvasRef.current.style.cursor = "grabbing";
+          let lastDragPos = pos;
+          const onWinMove = (ev: MouseEvent) => {
+            const dx = ev.clientX - lastDragPos.x;
+            const dy = ev.clientY - lastDragPos.y;
+            lastDragPos = { x: ev.clientX, y: ev.clientY };
+            const b = annotationsRef.current[bubbleIdx] as Extract<Annotation, { kind: "bubble" }>;
+            annotationsRef.current = [
+              ...annotationsRef.current.slice(0, bubbleIdx),
+              { ...b, x: b.x + dx, y: b.y + dy, tail: b.tail ? { x: b.tail.x + dx, y: b.tail.y + dy } : undefined },
+              ...annotationsRef.current.slice(bubbleIdx + 1),
+            ];
+            draw();
+          };
+          const onWinUp = () => {
+            if (canvasRef.current) canvasRef.current.style.cursor = "crosshair";
+            window.removeEventListener("mousemove", onWinMove);
+            window.removeEventListener("mouseup", onWinUp);
+          };
+          window.addEventListener("mousemove", onWinMove);
+          window.addEventListener("mouseup", onWinUp);
+          return;
+        }
+
         const { sx, sy, sw, sh } = getSelRect(startPos.current, endPos.current);
         const inside = pos.x >= sx && pos.x <= sx + sw && pos.y >= sy && pos.y <= sy + sh;
         if (inside) {
@@ -1098,11 +1168,11 @@ function CaptureOverlay() {
         draw();
         return;
       }
-      // Bubble: place immediately on click, no drag
+      // Bubble: click → coloca sin cola; drag → crea burbuja con cono apuntando al destino
       if (activeTool === "bubble") {
+        isDraggingAnn.current = true;
         const n = annotationsRef.current.filter((a) => a.kind === "bubble").length + 1;
-        annotationsRef.current = [...annotationsRef.current, { kind: "bubble", x: pos.x, y: pos.y, n, color: strokeColor, size: strokeSize }];
-        setAnnCount(annotationsRef.current.length);
+        currentAnnRef.current = { kind: "bubble", x: pos.x, y: pos.y, n, color: strokeColor, size: strokeSize };
         draw();
         return;
       }
@@ -1154,9 +1224,13 @@ function CaptureOverlay() {
     if (phase.current === "annotating" && !resizingHandleRef.current) {
       const { sx, sy, sw, sh } = getSelRect(startPos.current, endPos.current);
       const handle = getHandleAtPoint(pos.x, pos.y, sx, sy, sw, sh);
+      const overBubble = activeTool === null && annotationsRef.current.some(
+        (a) => a.kind === "bubble" && Math.sqrt((pos.x - a.x) ** 2 + (pos.y - a.y) ** 2) <= 12 + a.size * 2
+      );
       const newCursor = handle
         ? getHandleCursor(handle)
         : activeTool === "text" ? "text"
+        : overBubble ? "grab"
         : activeTool === null && pos.x >= sx && pos.x <= sx + sw && pos.y >= sy && pos.y <= sy + sh ? "grab"
         : "crosshair";
       if (canvasRef.current) canvasRef.current.style.cursor = newCursor;
@@ -1205,6 +1279,9 @@ function CaptureOverlay() {
         case "ruler":
           currentAnnRef.current = { ...ann, to: pos };
           break;
+        case "bubble":
+          currentAnnRef.current = { ...ann, tail: pos };
+          break;
       }
       draw();
       return;
@@ -1251,6 +1328,12 @@ function CaptureOverlay() {
         const dx = pos.x - ann.from.x;
         const dy = pos.y - ann.from.y;
         if (Math.sqrt(dx * dx + dy * dy) < 5) finalAnn = null;
+      } else if (ann.kind === "bubble") {
+        const dx = pos.x - ann.x;
+        const dy = pos.y - ann.y;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        // Si el drag fue corto es un click → sin cola; si fue largo → con cono
+        finalAnn = dist < 8 ? { ...ann, tail: undefined } : { ...ann, tail: pos };
       }
 
       if (finalAnn) {
@@ -1315,14 +1398,15 @@ function CaptureOverlay() {
   };
 
   // ── Render ────────────────────────────────────────────────────────────
-  const toolDefs: { tool: Tool; icon: React.ReactNode; title: string }[] = [
-    { tool: "arrow",     icon: "→",  title: "Arrow" },
-    { tool: "rect",      icon: "□",  title: "Rectangle (Ctrl=square)" },
-    { tool: "circle",    icon: "○",  title: "Circle (Ctrl=perfect)" },
-    { tool: "marker",    icon: "~",  title: "Marker" },
+  const toolDefs: { tool: Tool; icon: React.ReactNode; title: string; key: string }[] = [
+    { tool: "arrow",     icon: "→",  title: "Arrow [A]",                   key: "A" },
+    { tool: "rect",      icon: "□",  title: "Rectangle [S] (Ctrl=square)", key: "S" },
+    { tool: "circle",    icon: "○",  title: "Circle [C] (Ctrl=perfect)",   key: "C" },
+    { tool: "marker",    icon: "~",  title: "Marker [P]",                  key: "P" },
     {
       tool: "highlight",
-      title: "Highlighter",
+      title: "Highlighter [H]",
+      key: "H",
       icon: (
         <svg width="16" height="16" viewBox="0 0 16 16" fill="none" strokeLinecap="round" strokeLinejoin="round">
           <rect x="1.5" y="9" width="13" height="4.5" rx="2" fill="currentColor" fillOpacity="0.35" stroke="none"/>
@@ -1332,11 +1416,12 @@ function CaptureOverlay() {
         </svg>
       ),
     },
-    { tool: "text",  icon: "T",  title: "Text" },
-    { tool: "blur",  icon: "◌",  title: "Blur" },
+    { tool: "text",  icon: "T",  title: "Text [T]",  key: "T" },
+    { tool: "blur",  icon: "◌",  title: "Blur [B]",  key: "B" },
     {
       tool: "invert",
-      title: "Invert colors",
+      title: "Invert colors [I]",
+      key: "I",
       icon: (
         <svg width="16" height="16" viewBox="0 0 16 16">
           <circle cx="8" cy="8" r="5.5" fill="currentColor" stroke="currentColor" strokeWidth="1.2"/>
@@ -1344,10 +1429,11 @@ function CaptureOverlay() {
         </svg>
       ),
     },
-    { tool: "bubble", icon: "①", title: "Numbered bubble" },
+    { tool: "bubble", icon: "①", title: "Numbered bubble [N]", key: "N" },
     {
       tool: "ruler",
-      title: "Ruler (measure px)",
+      title: "Ruler [L] (measure px)",
+      key: "L",
       icon: (
         <svg width="17" height="17" viewBox="0 0 17 17" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round">
           <rect x="1" y="5.5" width="15" height="6" rx="1.2" strokeWidth="1.3" fill="none"/>
@@ -1401,7 +1487,7 @@ function CaptureOverlay() {
         >
           {/* ── Row 1: Annotation tools ── */}
           <div style={{ display: "flex", alignItems: "center", gap: 3, padding: "7px 10px" }}>
-            {toolDefs.map(({ tool, icon, title }) => (
+            {toolDefs.map(({ tool, icon, title, key }) => (
               <button
                 key={tool}
                 onClick={() => setActiveTool(activeTool === tool ? null : tool)}
@@ -1413,16 +1499,39 @@ function CaptureOverlay() {
                   color: activeTool === tool ? "#4ade80" : "#d1d5db",
                   cursor: "pointer",
                   width: 28,
-                  height: 28,
+                  height: 32,
                   display: "flex",
+                  flexDirection: "column",
                   alignItems: "center",
                   justifyContent: "center",
+                  gap: 1,
                   fontSize: 14,
                   fontWeight: "bold",
                   flexShrink: 0,
+                  position: "relative",
+                  paddingBottom: 2,
                 }}
               >
-                {icon}
+                <span style={{
+                  width: 16, height: 16,
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                  flexShrink: 0,
+                }}>
+                  {icon}
+                </span>
+                <span style={{
+                  fontSize: 7,
+                  fontWeight: "normal",
+                  fontFamily: "monospace",
+                  opacity: activeTool === tool ? 0.7 : 0.35,
+                  lineHeight: 1,
+                  display: "block",
+                  width: "100%",
+                  textAlign: "center",
+                  marginTop: 2,
+                }}>
+                  {key}
+                </span>
               </button>
             ))}
 

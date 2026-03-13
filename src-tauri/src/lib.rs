@@ -84,12 +84,14 @@ pub fn run() {
         .expect("error while running tauri application");
 }
 
-/// Renderiza el SVG de la app a RGBA y lo convierte en un icono de Tauri.
+/// SVG embebido en el binario — no depende de ningún archivo externo en runtime.
+const TRAY_ICON_SVG: &[u8] = include_bytes!("../../public/aurora-screenshots-icon.svg");
+
+/// Renderiza bytes SVG a RGBA y los convierte en un icono de Tauri.
 /// Usa resvg (pure-Rust) para no depender de herramientas externas.
-fn load_svg_icon(path: &std::path::Path, size: u32) -> Option<tauri::image::Image<'static>> {
-    let data = std::fs::read(path).ok()?;
+fn load_svg_icon(data: &[u8], size: u32) -> Option<tauri::image::Image<'static>> {
     let opt = resvg::usvg::Options::default();
-    let tree = resvg::usvg::Tree::from_data(&data, &opt).ok()?;
+    let tree = resvg::usvg::Tree::from_data(data, &opt).ok()?;
     let mut pixmap = resvg::tiny_skia::Pixmap::new(size, size)?;
     let svg_w = tree.size().width();
     let svg_h = tree.size().height();
@@ -109,12 +111,8 @@ fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
 
     let menu = Menu::with_items(app, &[&capture_item, &history_item, &separator, &quit_item])?;
 
-    // Intentar cargar el SVG real; si falla, usar el ícono PNG por defecto
-    let icon = app
-        .path()
-        .resource_dir()
-        .ok()
-        .and_then(|dir| load_svg_icon(&dir.join("aurora-screenshots-icon.svg"), 64))
+    // Ícono embebido en el binario — funciona independientemente de cómo se instale la app
+    let icon = load_svg_icon(TRAY_ICON_SVG, 64)
         .or_else(|| app.default_window_icon().cloned())
         .ok_or("No se encontró el ícono de la app")?;
 

@@ -1,6 +1,6 @@
 [package]
 name = "aurora-screenshots"
-version = "0.1.0"
+version = "0.2.0"
 description = "Aurora Screenshots — clipboard manager and screen capture"
 authors = ["you"]
 edition = "2021"
