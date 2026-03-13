@@ -1,0 +1,101 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libxdo-dev \
+            libssl-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install Node dependencies
+        run: npm ci
+
+      - name: Build frontend
+        run: npm run build
+
+      - name: Build release binary
+        run: cargo build --release --manifest-path src-tauri/Cargo.toml
+
+      - name: Package tarball
+        run: |
+          chmod +x scripts/build-dist.sh
+          # build-dist.sh compila de nuevo — evitamos eso reutilizando el binario ya compilado
+          VERSION="${GITHUB_REF_NAME#v}"
+          DIST_NAME="aurora-screenshots-${VERSION}-linux-x86_64"
+          mkdir -p "dist/$DIST_NAME/icons"
+
+          cp src-tauri/target/release/aurora-screenshots        "dist/$DIST_NAME/"
+          cp aurora-screenshots.desktop                         "dist/$DIST_NAME/"
+          cp src-tauri/icons/32x32.png                          "dist/$DIST_NAME/icons/32x32.png"
+          cp src-tauri/icons/128x128.png                        "dist/$DIST_NAME/icons/128x128.png"
+          cp src-tauri/icons/icon.png                           "dist/$DIST_NAME/icons/256x256.png"
+          cp public/aurora-screenshots-icon.svg                 "dist/$DIST_NAME/icons/aurora-screenshots.svg"
+
+          cat > "dist/$DIST_NAME/install.sh" << 'INSTALLER'
+          #!/bin/bash
+          set -e
+          BINARY_NAME="aurora-screenshots"
+          INSTALL_DIR="$HOME/.local/bin"
+          ICON_DIR="$HOME/.local/share/icons/hicolor"
+          DESKTOP_DIR="$HOME/.local/share/applications"
+          DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+          echo "Installing Aurora Screenshots..."
+          mkdir -p "$INSTALL_DIR"
+          cp "$DIR/$BINARY_NAME" "$INSTALL_DIR/" && chmod +x "$INSTALL_DIR/$BINARY_NAME"
+          mkdir -p "$ICON_DIR/32x32/apps" "$ICON_DIR/128x128/apps" "$ICON_DIR/256x256/apps" "$ICON_DIR/scalable/apps"
+          cp "$DIR/icons/32x32.png"              "$ICON_DIR/32x32/apps/$BINARY_NAME.png"
+          cp "$DIR/icons/128x128.png"            "$ICON_DIR/128x128/apps/$BINARY_NAME.png"
+          cp "$DIR/icons/256x256.png"            "$ICON_DIR/256x256/apps/$BINARY_NAME.png"
+          cp "$DIR/icons/aurora-screenshots.svg" "$ICON_DIR/scalable/apps/$BINARY_NAME.svg"
+          mkdir -p "$DESKTOP_DIR"
+          cp "$DIR/aurora-screenshots.desktop" "$DESKTOP_DIR/"
+          update-desktop-database "$DESKTOP_DIR" 2>/dev/null || true
+          gtk-update-icon-cache -f -t "$ICON_DIR" 2>/dev/null || true
+          echo "✓ Aurora Screenshots installed"
+          if [[ ":$PATH:" != *":$HOME/.local/bin:"* ]]; then
+            echo "⚠ Add ~/.local/bin to your PATH: export PATH=\"\$HOME/.local/bin:\$PATH\""
+          fi
+          INSTALLER
+          chmod +x "dist/$DIST_NAME/install.sh"
+
+          cd dist
+          tar -czf "${DIST_NAME}.tar.gz" "$DIST_NAME"
+          echo "DIST_FILE=${DIST_NAME}.tar.gz" >> $GITHUB_ENV
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/${{ env.DIST_FILE }}
+          generate_release_notes: true

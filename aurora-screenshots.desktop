@@ -1,0 +1,12 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Aurora Screenshots
+Comment=Screen capture with annotation tools and clipboard history
+Exec=aurora-screenshots
+Icon=aurora-screenshots
+Terminal=false
+Categories=Utility;Graphics;
+Keywords=screenshot;capture;clipboard;annotate;blur;
+StartupNotify=true
+StartupWMClass=aurora-screenshots

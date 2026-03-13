@@ -29,6 +29,20 @@ A Linux desktop app for screen capture with annotation tools and clipboard histo
 | Clipboard | `arboard` |
 | Input grab | `x11rb` |
 
+## Installation
+
+Download the latest `.tar.gz` from [Releases](../../releases), extract and run the installer:
+
+```bash
+tar -xzf aurora-screenshots-*-linux-x86_64.tar.gz
+cd aurora-screenshots-*
+./install.sh
+```
+
+The installer copies the binary to `~/.local/bin`, registers the icons and creates a launcher in your application menu. No root required.
+
+> Make sure `~/.local/bin` is in your `PATH`. On most distros it is added automatically; if not, add `export PATH="$HOME/.local/bin:$PATH"` to your `~/.bashrc` or `~/.zshrc`.
+
 ## Requirements
 
 - Linux (X11 or Wayland)
@@ -43,10 +57,11 @@ npm install
 npm run tauri dev
 ```
 
-## Build
+## Build release tarball
 
 ```bash
-npm run tauri build
+./scripts/build-dist.sh
+# → dist/aurora-screenshots-0.1.0-linux-x86_64.tar.gz
 ```
 
 ## Keyboard shortcuts
