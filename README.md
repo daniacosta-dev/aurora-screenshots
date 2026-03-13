@@ -1,6 +1,13 @@
+<div align="center">
+    <a href="https://youtu.be/4MWk-g5m8YM">
+        <img src="assets/aurora screenshot feat.png" width="80%" style="border-radius:10px">
+    </a>
+
 # Aurora Screenshots
 
-A Linux desktop app for screen capture with annotation tools and clipboard history. Built with Tauri v2.
+A Linux desktop app for screen capture with annotation tools and clipboard history. Built with Rust & Tauri v2.
+
+</div>
 
 ## Features
 
@@ -12,7 +19,37 @@ A Linux desktop app for screen capture with annotation tools and clipboard histo
 - **System tray** — lives in the tray, no taskbar clutter; accessible via tray menu or global shortcut
 - **Global shortcut** — `Ctrl+Shift+S` from anywhere to open the capture overlay
 - **Multi-monitor support** — overlay covers all monitors, coordinates correctly mapped across the virtual desktop
-- **X11 + Wayland** — X11 via native capture with input grab; Wayland via XDG Desktop Portal
+
+## What's new in v0.3.0
+
+- **Extended annotation toolset** — circle/ellipse, freehand marker, highlighter, color inversion, and pixel ruler tools join the existing set.
+- **Numbered bubble indicators** — add auto-incrementing numbered bubbles for step-by-step callouts, with a draggable tail pointer.
+- **Keyboard shortcuts for tools** — switch tools instantly without touching the toolbar: `A` Arrow · `S` Rectangle · `C` Circle · `P` Marker · `H` Highlight · `T` Text · `B` Blur · `I` Invert · `N` Bubble · `L` Ruler.
+- **Resizable selection** — fine-tune your selection after drawing it using 8 resize handles before annotating or capturing.
+- **Right-click color picker** — right-click anywhere on the overlay to open a floating color palette at your cursor, with preset swatches and a hex input field.
+- **System notifications** — a desktop notification confirms each successful capture.
+- **ESC always closes** — ESC now exits the overlay immediately from any state, including mid-annotation.
+- **Fixed**: first keypress after re-opening the overlay was swallowed, requiring two keypresses to act.
+- **Fixed**: black screen on second capture after closing with ESC.
+
+---
+
+## Demo
+<div>
+<p align="center">
+  <img src="assets/demo1.gif" width="80%">
+</p>
+
+
+<p align="center">
+  <img src="assets/demo2.gif" width="80%">
+</p>
+
+
+<p align="center">
+    <img src="assets/demo3.gif" width="80%">
+</p>
+</div>
 
 ## Stack
 

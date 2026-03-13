@@ -84,7 +84,10 @@ parts:
       npm run build
 
       # ── Tauri binary ─────────────────────────────────────────────────────
-      cargo build --release --manifest-path src-tauri/Cargo.toml
+      # Usar el CLI de Tauri (no cargo directamente) para que embedee
+      # correctamente los assets del frontend en el binario de producción.
+      # --bundles none omite la generación de .deb/.rpm/.appimage.
+      ./node_modules/.bin/tauri build --bundles deb
 
       # ── Install ──────────────────────────────────────────────────────────
       install -Dm755 src-tauri/target/release/aurora-screenshots \
