@@ -1300,8 +1300,8 @@ function CaptureOverlay() {
   const getToolbarStyle = (): React.CSSProperties => {
     const { sx, sy, sw, sh } = getSelRect(startPos.current, endPos.current);
     const W = window.innerWidth;
-    const TOOLBAR_W = 750;
-    const TOOLBAR_H = 50;
+    const TOOLBAR_W = 624;
+    const TOOLBAR_H = 88;
     const spaceBelow = window.innerHeight - (sy + sh);
     const top = spaceBelow > TOOLBAR_H + 12 ? sy + sh + 8 : sy - TOOLBAR_H - 8;
     const left = Math.max(4, Math.min(sx + sw / 2 - TOOLBAR_W / 2, W - TOOLBAR_W - 4));
@@ -1383,228 +1383,233 @@ function CaptureOverlay() {
         onMouseUp={onMouseUp}
       />
 
-      {/* Annotation toolbar */}
+      {/* Annotation toolbar — two rows */}
       {displayPhase === "annotating" && (
         <div
           style={{
             position: "absolute",
             ...getToolbarStyle(),
-            background: "rgba(18, 18, 20, 0.92)",
+            background: "rgba(16, 16, 18, 0.95)",
             border: "1px solid rgba(255,255,255,0.1)",
-            borderRadius: 10,
-            padding: "6px 10px",
-            display: "flex",
-            alignItems: "center",
-            gap: 4,
-            backdropFilter: "blur(16px)",
+            borderRadius: 12,
+            backdropFilter: "blur(20px)",
             zIndex: 100,
-            boxShadow: "0 4px 24px rgba(0,0,0,0.5)",
+            boxShadow: "0 6px 32px rgba(0,0,0,0.55)",
+            overflow: "hidden",
           }}
           onMouseDown={(e) => e.stopPropagation()}
         >
-          {/* Tool buttons */}
-          {toolDefs.map(({ tool, icon, title }) => (
-            <button
-              key={tool}
-              onClick={() => setActiveTool(activeTool === tool ? null : tool)}
-              title={title}
-              style={{
-                background: activeTool === tool ? "rgba(74,222,128,0.18)" : "transparent",
-                border: activeTool === tool ? "1px solid #4ade80" : "1px solid transparent",
-                borderRadius: 6,
-                color: activeTool === tool ? "#4ade80" : "#e5e7eb",
-                cursor: "pointer",
-                width: 30,
-                height: 30,
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                fontSize: 15,
-                fontWeight: "bold",
-              }}
-            >
-              {icon}
-            </button>
-          ))}
+          {/* ── Row 1: Annotation tools ── */}
+          <div style={{ display: "flex", alignItems: "center", gap: 3, padding: "7px 10px" }}>
+            {toolDefs.map(({ tool, icon, title }) => (
+              <button
+                key={tool}
+                onClick={() => setActiveTool(activeTool === tool ? null : tool)}
+                title={title}
+                style={{
+                  background: activeTool === tool ? "rgba(74,222,128,0.18)" : "transparent",
+                  border: activeTool === tool ? "1px solid #4ade80" : "1px solid transparent",
+                  borderRadius: 6,
+                  color: activeTool === tool ? "#4ade80" : "#d1d5db",
+                  cursor: "pointer",
+                  width: 28,
+                  height: 28,
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  fontSize: 14,
+                  fontWeight: "bold",
+                  flexShrink: 0,
+                }}
+              >
+                {icon}
+              </button>
+            ))}
 
-          <div style={{ width: 1, height: 22, background: "rgba(255,255,255,0.12)", margin: "0 3px" }} />
+            <div style={{ width: 1, height: 20, background: "rgba(255,255,255,0.1)", margin: "0 4px", flexShrink: 0 }} />
 
-          {/* Color presets */}
-          {PRESET_COLORS.map((c) => (
-            <button
-              key={c}
-              onClick={() => setStrokeColor(c)}
-              style={{
-                width: 16,
-                height: 16,
-                borderRadius: "50%",
-                background: c,
-                border: strokeColor === c ? "2px solid #fff" : "1px solid rgba(255,255,255,0.25)",
-                cursor: "pointer",
-                padding: 0,
-                flexShrink: 0,
-              }}
-            />
-          ))}
+            {/* Color presets */}
+            {PRESET_COLORS.map((c) => (
+              <button
+                key={c}
+                onClick={() => setStrokeColor(c)}
+                style={{
+                  width: 15,
+                  height: 15,
+                  borderRadius: "50%",
+                  background: c,
+                  border: strokeColor === c ? "2px solid #fff" : "1px solid rgba(255,255,255,0.2)",
+                  cursor: "pointer",
+                  padding: 0,
+                  flexShrink: 0,
+                }}
+              />
+            ))}
 
-          <ColorPicker value={strokeColor} onChange={setStrokeColor} />
+            <ColorPicker value={strokeColor} onChange={setStrokeColor} />
 
-          <div style={{ width: 1, height: 22, background: "rgba(255,255,255,0.12)", margin: "0 3px" }} />
+            <div style={{ width: 1, height: 20, background: "rgba(255,255,255,0.1)", margin: "0 4px", flexShrink: 0 }} />
 
-          {/* Stroke size */}
-          {([{ v: 2, label: "S" }, { v: 4, label: "M" }, { v: 6, label: "L" }] as const).map(({ v, label }) => (
-            <button
-              key={v}
-              onClick={() => setStrokeSize(v)}
-              style={{
-                background: strokeSize === v ? "rgba(255,255,255,0.18)" : "transparent",
-                border: strokeSize === v ? "1px solid rgba(255,255,255,0.5)" : "1px solid transparent",
-                borderRadius: 5,
-                color: strokeSize === v ? "#fff" : "#9ca3af",
-                cursor: "pointer",
-                width: 24,
-                height: 24,
-                fontSize: 11,
-                fontWeight: "bold",
-              }}
-            >
-              {label}
-            </button>
-          ))}
+            {/* Stroke size */}
+            {([{ v: 2, label: "S" }, { v: 4, label: "M" }, { v: 6, label: "L" }] as const).map(({ v, label }) => (
+              <button
+                key={v}
+                onClick={() => setStrokeSize(v)}
+                style={{
+                  background: strokeSize === v ? "rgba(255,255,255,0.15)" : "transparent",
+                  border: strokeSize === v ? "1px solid rgba(255,255,255,0.45)" : "1px solid transparent",
+                  borderRadius: 5,
+                  color: strokeSize === v ? "#fff" : "#6b7280",
+                  cursor: "pointer",
+                  width: 22,
+                  height: 22,
+                  fontSize: 10,
+                  fontWeight: "bold",
+                  flexShrink: 0,
+                }}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
 
-          <div style={{ width: 1, height: 22, background: "rgba(255,255,255,0.12)", margin: "0 3px" }} />
+          {/* ── Divider ── */}
+          <div style={{ height: 1, background: "rgba(255,255,255,0.07)", margin: "0 10px" }} />
 
-          {/* Undo */}
-          <button
-            onClick={() => {
-              annotationsRef.current = annotationsRef.current.slice(0, -1);
-              setAnnCount(annotationsRef.current.length);
-              draw();
-            }}
-            disabled={annCount === 0}
-            title="Undo (Ctrl+Z)"
-            style={{
-              background: "transparent",
-              border: "1px solid transparent",
-              borderRadius: 6,
-              color: annCount === 0 ? "#4b5563" : "#e5e7eb",
-              cursor: annCount === 0 ? "default" : "pointer",
-              width: 30,
-              height: 30,
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              fontSize: 15,
-            }}
-          >
-            <svg width="15" height="15" viewBox="0 0 15 15" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M4.5 8.5a4 4 0 1 0 .8-2.8"/>
-              <polyline points="2,5 4.5,5 4.5,7.5"/>
-            </svg>
-          </button>
-
-          {/* Pin screenshot */}
-          <button
-            onClick={pinCapture}
-            title="Pin on screen"
-            style={{
-              background: "rgba(0,229,255,0.12)",
-              border: "1px solid rgba(0,229,255,0.45)",
-              borderRadius: 6,
-              color: "rgba(0,229,255,0.9)",
-              cursor: "pointer",
-              padding: "4px 8px",
-              fontSize: 11,
-              fontWeight: "bold",
-              whiteSpace: "nowrap",
-            }}
-          >
-            📌
-          </button>
-
-          {/* Save to file */}
-          <button
-            onClick={saveCapture}
-            title="Save as PNG"
-            style={{
-              background: "transparent",
-              border: "1px solid transparent",
-              borderRadius: 6,
-              color: "#e5e7eb",
-              cursor: "pointer",
-              width: 30,
-              height: 30,
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-            }}
-          >
-            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round">
-              {/* Cuerpo del disquete */}
-              <rect x="2" y="2" width="12" height="12" rx="1.5"/>
-              {/* Etiqueta inferior */}
-              <rect x="4.5" y="8.5" width="7" height="4" rx="0.8"/>
-              {/* Ranura superior (área de escritura) */}
-              <rect x="5" y="2" width="5" height="3.5" rx="0.5"/>
-              {/* Tapa de la ranura */}
-              <line x1="8.5" y1="2.5" x2="8.5" y2="5"/>
-            </svg>
-          </button>
-
-          {/* Confirm capture */}
-          <button
-            onClick={exportCapture}
-            title="Capture (Ctrl+C)"
-            style={{
-              background: "rgba(74,222,128,0.18)",
-              border: "1px solid #4ade80",
-              borderRadius: 6,
-              color: "#4ade80",
-              cursor: "pointer",
-              padding: "4px 10px",
-              fontSize: 11,
-              fontWeight: "bold",
-              whiteSpace: "nowrap",
-            }}
-          >
-            Capture
-          </button>
-
-          {/* Cancel */}
-          <button
-            onClick={async () => {
-              reset();
-              await hideOverlay();
-            }}
-            title="Cancel (Esc)"
-            style={{
-              background: "transparent",
-              border: "1px solid rgba(255,255,255,0.15)",
-              borderRadius: 6,
-              color: "#6b7280",
-              cursor: "pointer",
-              padding: "4px 8px",
-              fontSize: 11,
-              whiteSpace: "nowrap",
-            }}
-          >
-            Esc
-          </button>
-
-          <div style={{ width: 1, height: 22, background: "rgba(255,255,255,0.12)", margin: "0 3px" }} />
-
-          {/* Selection size */}
-          <span
-            style={{
-              color: "#9ca3af",
+          {/* ── Row 2: Actions ── */}
+          <div style={{ display: "flex", alignItems: "center", gap: 3, padding: "5px 10px" }}>
+            {/* Selection size — info, left side */}
+            <span style={{
+              color: "#4b5563",
               fontSize: 10,
               fontFamily: "monospace",
               whiteSpace: "nowrap",
               userSelect: "none",
-            }}
-          >
-            {getSelectionSize()}
-          </span>
+              letterSpacing: "0.02em",
+            }}>
+              {getSelectionSize()}
+            </span>
+
+            <div style={{ flex: 1 }} />
+
+            {/* Undo */}
+            <button
+              onClick={() => {
+                annotationsRef.current = annotationsRef.current.slice(0, -1);
+                setAnnCount(annotationsRef.current.length);
+                draw();
+              }}
+              disabled={annCount === 0}
+              title="Undo (Ctrl+Z)"
+              style={{
+                background: "transparent",
+                border: "1px solid transparent",
+                borderRadius: 6,
+                color: annCount === 0 ? "#374151" : "#9ca3af",
+                cursor: annCount === 0 ? "default" : "pointer",
+                width: 28,
+                height: 28,
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+              }}
+            >
+              <svg width="14" height="14" viewBox="0 0 15 15" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M4.5 8.5a4 4 0 1 0 .8-2.8"/>
+                <polyline points="2,5 4.5,5 4.5,7.5"/>
+              </svg>
+            </button>
+
+            <div style={{ width: 1, height: 18, background: "rgba(255,255,255,0.08)", margin: "0 4px", flexShrink: 0 }} />
+
+            {/* Save to file */}
+            <button
+              onClick={saveCapture}
+              title="Save as PNG"
+              style={{
+                background: "transparent",
+                border: "1px solid rgba(255,255,255,0.1)",
+                borderRadius: 6,
+                color: "#9ca3af",
+                cursor: "pointer",
+                width: 28,
+                height: 28,
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+              }}
+            >
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round">
+                <rect x="2" y="2" width="12" height="12" rx="1.5"/>
+                <rect x="4.5" y="8.5" width="7" height="4" rx="0.8"/>
+                <rect x="5" y="2" width="5" height="3.5" rx="0.5"/>
+                <line x1="8.5" y1="2.5" x2="8.5" y2="5"/>
+              </svg>
+            </button>
+
+            {/* Pin */}
+            <button
+              onClick={pinCapture}
+              title="Pin on screen"
+              style={{
+                background: "transparent",
+                border: "1px solid rgba(255,255,255,0.1)",
+                borderRadius: 6,
+                color: "#9ca3af",
+                cursor: "pointer",
+                width: 28,
+                height: 28,
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                fontSize: 13,
+              }}
+            >
+              📌
+            </button>
+
+            <div style={{ width: 1, height: 18, background: "rgba(255,255,255,0.08)", margin: "0 4px", flexShrink: 0 }} />
+
+            {/* Capture — primary action */}
+            <button
+              onClick={exportCapture}
+              title="Copy to clipboard (Ctrl+C)"
+              style={{
+                background: "rgba(74,222,128,0.15)",
+                border: "1px solid rgba(74,222,128,0.6)",
+                borderRadius: 7,
+                color: "#4ade80",
+                cursor: "pointer",
+                padding: "0 14px",
+                height: 28,
+                fontSize: 12,
+                fontWeight: "600",
+                whiteSpace: "nowrap",
+                letterSpacing: "0.01em",
+              }}
+            >
+              Capture
+            </button>
+
+            {/* Esc */}
+            <button
+              onClick={async () => { reset(); await hideOverlay(); }}
+              title="Cancel (Esc)"
+              style={{
+                background: "transparent",
+                border: "1px solid rgba(255,255,255,0.1)",
+                borderRadius: 6,
+                color: "#4b5563",
+                cursor: "pointer",
+                padding: "0 10px",
+                height: 28,
+                fontSize: 11,
+                whiteSpace: "nowrap",
+              }}
+            >
+              Esc
+            </button>
+          </div>
         </div>
       )}
 
