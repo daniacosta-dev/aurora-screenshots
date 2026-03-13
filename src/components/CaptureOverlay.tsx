@@ -8,7 +8,7 @@ import { pictureDir, downloadDir } from "@tauri-apps/api/path";
 // ── Types ──────────────────────────────────────────────────────────────────
 
 type Phase = "idle" | "drawing" | "annotating";
-type Tool = "arrow" | "rect" | "circle" | "marker" | "text" | "blur" | "bubble" | "ruler";
+type Tool = "arrow" | "rect" | "circle" | "marker" | "highlight" | "text" | "blur" | "invert" | "bubble" | "ruler";
 
 interface Pt {
   x: number;
@@ -23,6 +23,8 @@ type Annotation =
   | { kind: "text"; x: number; y: number; text: string; color: string; size: number }
   | { kind: "blur"; x: number; y: number; w: number; h: number }
   | { kind: "bubble"; x: number; y: number; n: number; color: string; size: number }
+  | { kind: "highlight"; points: Pt[]; color: string; size: number }
+  | { kind: "invert"; x: number; y: number; w: number; h: number }
   | { kind: "ruler"; from: Pt; to: Pt; color: string };
 
 // ── Resize handles ────────────────────────────────────────────────────────
@@ -304,6 +306,53 @@ function drawRulerAnnotation(
   ctx.restore();
 }
 
+function drawHighlight(
+  ctx: CanvasRenderingContext2D,
+  points: Pt[],
+  color: string,
+  size: number
+) {
+  if (points.length < 2) return;
+  ctx.save();
+  ctx.globalAlpha = 0.38;
+  ctx.strokeStyle = color;
+  ctx.lineWidth = size * 7;
+  ctx.lineCap = "square";
+  ctx.lineJoin = "round";
+  ctx.beginPath();
+  ctx.moveTo(points[0].x, points[0].y);
+  for (let i = 1; i < points.length; i++) ctx.lineTo(points[i].x, points[i].y);
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawInvertAnnotation(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  w: number,
+  h: number
+) {
+  if (w < 2 || h < 2) return;
+  const m = ctx.getTransform();
+  const px = Math.round(m.a * x + m.c * y + m.e);
+  const py = Math.round(m.b * x + m.d * y + m.f);
+  const pw = Math.max(1, Math.round(Math.abs(m.a) * w));
+  const ph = Math.max(1, Math.round(Math.abs(m.d) * h));
+  try {
+    const imgData = ctx.getImageData(px, py, pw, ph);
+    const d = imgData.data;
+    for (let i = 0; i < d.length; i += 4) {
+      d[i]     = 255 - d[i];
+      d[i + 1] = 255 - d[i + 1];
+      d[i + 2] = 255 - d[i + 2];
+    }
+    ctx.putImageData(imgData, px, py);
+  } catch (e) {
+    console.warn("invert: getImageData failed", e);
+  }
+}
+
 function drawAnnotation(ctx: CanvasRenderingContext2D, ann: Annotation, dpr = 1) {
   switch (ann.kind) {
     case "arrow":
@@ -323,6 +372,12 @@ function drawAnnotation(ctx: CanvasRenderingContext2D, ann: Annotation, dpr = 1)
       break;
     case "blur":
       drawBlurAnnotation(ctx, ann.x, ann.y, ann.w, ann.h);
+      break;
+    case "highlight":
+      drawHighlight(ctx, ann.points, ann.color, ann.size);
+      break;
+    case "invert":
+      drawInvertAnnotation(ctx, ann.x, ann.y, ann.w, ann.h);
       break;
     case "bubble":
       drawBubble(ctx, ann.x, ann.y, ann.n, ann.color, ann.size);
@@ -1067,8 +1122,14 @@ function CaptureOverlay() {
         case "marker":
           currentAnnRef.current = { kind: "marker", points: [pos], color: strokeColor, size: strokeSize };
           break;
+        case "highlight":
+          currentAnnRef.current = { kind: "highlight", points: [pos], color: strokeColor, size: strokeSize };
+          break;
         case "blur":
           currentAnnRef.current = { kind: "blur", x: pos.x, y: pos.y, w: 0, h: 0 };
+          break;
+        case "invert":
+          currentAnnRef.current = { kind: "invert", x: pos.x, y: pos.y, w: 0, h: 0 };
           break;
         case "ruler":
           currentAnnRef.current = { kind: "ruler", from: pos, to: pos, color: strokeColor };
@@ -1132,7 +1193,13 @@ function CaptureOverlay() {
         case "marker":
           currentAnnRef.current = { ...ann, points: [...ann.points, pos] };
           break;
+        case "highlight":
+          currentAnnRef.current = { ...ann, points: [...ann.points, pos] };
+          break;
         case "blur":
+          currentAnnRef.current = { ...ann, w: pos.x - ann.x, h: pos.y - ann.y };
+          break;
+        case "invert":
           currentAnnRef.current = { ...ann, w: pos.x - ann.x, h: pos.y - ann.y };
           break;
         case "ruler":
@@ -1158,7 +1225,7 @@ function CaptureOverlay() {
 
       // Normalize and validate before committing
       let finalAnn: Annotation | null = ann;
-      if (ann.kind === "rect" || ann.kind === "blur" || ann.kind === "circle") {
+      if (ann.kind === "rect" || ann.kind === "blur" || ann.kind === "circle" || ann.kind === "invert") {
         const nx = Math.min(ann.x, ann.x + ann.w);
         const ny = Math.min(ann.y, ann.y + ann.h);
         const nw = Math.abs(ann.w);
@@ -1169,6 +1236,8 @@ function CaptureOverlay() {
           finalAnn = { ...ann, x: nx, y: ny, w: nw, h: nh };
         } else if (ann.kind === "circle") {
           finalAnn = { ...ann, x: nx, y: ny, w: nw, h: nh };
+        } else if (ann.kind === "invert") {
+          finalAnn = { kind: "invert", x: nx, y: ny, w: nw, h: nh };
         } else {
           finalAnn = { kind: "blur", x: nx, y: ny, w: nw, h: nh };
         }
@@ -1231,7 +1300,7 @@ function CaptureOverlay() {
   const getToolbarStyle = (): React.CSSProperties => {
     const { sx, sy, sw, sh } = getSelRect(startPos.current, endPos.current);
     const W = window.innerWidth;
-    const TOOLBAR_W = 680;
+    const TOOLBAR_W = 750;
     const TOOLBAR_H = 50;
     const spaceBelow = window.innerHeight - (sy + sh);
     const top = spaceBelow > TOOLBAR_H + 12 ? sy + sh + 8 : sy - TOOLBAR_H - 8;
@@ -1246,15 +1315,49 @@ function CaptureOverlay() {
   };
 
   // ── Render ────────────────────────────────────────────────────────────
-  const toolDefs: { tool: Tool; label: string; title: string }[] = [
-    { tool: "arrow", label: "→", title: "Arrow" },
-    { tool: "rect", label: "□", title: "Rectangle (Ctrl=square)" },
-    { tool: "circle", label: "○", title: "Circle (Ctrl=perfect)" },
-    { tool: "marker", label: "~", title: "Marker" },
-    { tool: "text", label: "T", title: "Text" },
-    { tool: "blur", label: "◌", title: "Blur" },
-    { tool: "bubble", label: "①", title: "Numbered bubble" },
-    { tool: "ruler", label: "ruler-svg", title: "Ruler (measure px)" },
+  const toolDefs: { tool: Tool; icon: React.ReactNode; title: string }[] = [
+    { tool: "arrow",     icon: "→",  title: "Arrow" },
+    { tool: "rect",      icon: "□",  title: "Rectangle (Ctrl=square)" },
+    { tool: "circle",    icon: "○",  title: "Circle (Ctrl=perfect)" },
+    { tool: "marker",    icon: "~",  title: "Marker" },
+    {
+      tool: "highlight",
+      title: "Highlighter",
+      icon: (
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" strokeLinecap="round" strokeLinejoin="round">
+          <rect x="1.5" y="9" width="13" height="4.5" rx="2" fill="currentColor" fillOpacity="0.35" stroke="none"/>
+          <line x1="4" y1="8.5" x2="12" y2="3.5" stroke="currentColor" strokeWidth="1.4"/>
+          <line x1="12" y1="3.5" x2="14" y2="5.5" stroke="currentColor" strokeWidth="1.4"/>
+          <line x1="4" y1="8.5" x2="6" y2="10.5" stroke="currentColor" strokeWidth="1.4"/>
+        </svg>
+      ),
+    },
+    { tool: "text",  icon: "T",  title: "Text" },
+    { tool: "blur",  icon: "◌",  title: "Blur" },
+    {
+      tool: "invert",
+      title: "Invert colors",
+      icon: (
+        <svg width="16" height="16" viewBox="0 0 16 16">
+          <circle cx="8" cy="8" r="5.5" fill="currentColor" stroke="currentColor" strokeWidth="1.2"/>
+          <path d="M8 2.5a5.5 5.5 0 0 0 0 11Z" fill="white" stroke="none"/>
+        </svg>
+      ),
+    },
+    { tool: "bubble", icon: "①", title: "Numbered bubble" },
+    {
+      tool: "ruler",
+      title: "Ruler (measure px)",
+      icon: (
+        <svg width="17" height="17" viewBox="0 0 17 17" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round">
+          <rect x="1" y="5.5" width="15" height="6" rx="1.2" strokeWidth="1.3" fill="none"/>
+          <line x1="4"  y1="5.5" x2="4"  y2="8"/>
+          <line x1="7"  y1="5.5" x2="7"  y2="9.5"/>
+          <line x1="10" y1="5.5" x2="10" y2="8"/>
+          <line x1="13" y1="5.5" x2="13" y2="9.5"/>
+        </svg>
+      ),
+    },
   ];
 
   return (
@@ -1300,7 +1403,7 @@ function CaptureOverlay() {
           onMouseDown={(e) => e.stopPropagation()}
         >
           {/* Tool buttons */}
-          {toolDefs.map(({ tool, label, title }) => (
+          {toolDefs.map(({ tool, icon, title }) => (
             <button
               key={tool}
               onClick={() => setActiveTool(activeTool === tool ? null : tool)}
@@ -1320,17 +1423,7 @@ function CaptureOverlay() {
                 fontWeight: "bold",
               }}
             >
-              {label === "ruler-svg" ? (
-                <svg width="17" height="17" viewBox="0 0 17 17" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round">
-                  {/* Ruler body */}
-                  <rect x="1" y="5.5" width="15" height="6" rx="1.2" stroke="currentColor" strokeWidth="1.3" fill="none"/>
-                  {/* Tick marks */}
-                  <line x1="4" y1="5.5" x2="4" y2="8"/>
-                  <line x1="7" y1="5.5" x2="7" y2="9.5"/>
-                  <line x1="10" y1="5.5" x2="10" y2="8"/>
-                  <line x1="13" y1="5.5" x2="13" y2="9.5"/>
-                </svg>
-              ) : label}
+              {icon}
             </button>
           ))}
 
