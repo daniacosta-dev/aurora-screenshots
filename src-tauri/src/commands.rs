@@ -426,5 +426,12 @@ pub fn copy_png_to_clipboard(image_data: String) -> Result<(), String> {
     clipboard::copy_png_b64_to_clipboard(&image_data)
 }
 
+/// Escribe un PNG base64 en la ruta indicada por el usuario.
+#[tauri::command]
+pub fn write_screenshot_file(path: String, image_data: String) -> Result<(), String> {
+    let png_bytes = STANDARD.decode(&image_data).map_err(|e| e.to_string())?;
+    std::fs::write(&path, &png_bytes).map_err(|e| e.to_string())
+}
+
 // ─── Helpers privados ─────────────────────────────────────────────────────
 

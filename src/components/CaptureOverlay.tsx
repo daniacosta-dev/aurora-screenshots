@@ -2,6 +2,8 @@ import { useCallback, useEffect, useReducer, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
+import { save as saveDialog } from "@tauri-apps/plugin-dialog";
+import { pictureDir, downloadDir } from "@tauri-apps/api/path";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -811,6 +813,65 @@ function CaptureOverlay() {
     }
   }, [reset, hideOverlay]);
 
+  // ── Save to file ──────────────────────────────────────────────────────
+  const saveCapture = useCallback(async () => {
+    const { sx, sy, sw, sh } = getSelRect(startPos.current, endPos.current);
+    if (sw < 5 || sh < 5) return;
+
+    const dpr = window.devicePixelRatio || 1;
+    const W = window.innerWidth;
+    const H = window.innerHeight;
+    const bg = bgImageRef.current;
+
+    const offscreen = document.createElement("canvas");
+    offscreen.width = Math.round(sw * dpr);
+    offscreen.height = Math.round(sh * dpr);
+    const ctx = offscreen.getContext("2d");
+    if (!ctx) return;
+
+    if (bg) {
+      const scaleX = bg.naturalWidth / W;
+      const scaleY = bg.naturalHeight / H;
+      ctx.drawImage(bg, sx * scaleX, sy * scaleY, sw * scaleX, sh * scaleY, 0, 0, sw * dpr, sh * dpr);
+    }
+    ctx.save();
+    ctx.scale(dpr, dpr);
+    ctx.translate(-sx, -sy);
+    for (const ann of annotationsRef.current) drawAnnotation(ctx, ann, dpr);
+    ctx.restore();
+
+    const blob = await new Promise<Blob | null>((resolve) => offscreen.toBlob(resolve, "image/png"));
+    if (!blob) return;
+    const ab = await blob.arrayBuffer();
+    const bytes = new Uint8Array(ab);
+    let binary = "";
+    for (let i = 0; i < bytes.byteLength; i++) binary += String.fromCharCode(bytes[i]);
+    const base64 = btoa(binary);
+
+    // Ocultar overlay ANTES del diálogo para que aparezca encima (override_redirect cubre todo)
+    reset();
+    await new Promise<void>((r) => requestAnimationFrame(() => r()));
+    await invoke("hide_capture_overlay");
+
+    // Carpeta por defecto: Imágenes → Descargas → home
+    const defaultDir = await pictureDir().catch(() => downloadDir().catch(() => ""));
+    const filename = `screenshot-${new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19)}.png`;
+    const defaultPath = defaultDir ? `${defaultDir}/${filename}` : filename;
+
+    const path = await saveDialog({
+      title: "Save screenshot",
+      defaultPath,
+      filters: [{ name: "PNG Image", extensions: ["png"] }],
+    });
+    if (!path) return; // usuario canceló
+
+    try {
+      await invoke("write_screenshot_file", { path, imageData: base64 });
+    } catch (err) {
+      console.error("Error al guardar archivo:", err);
+    }
+  }, [reset]);
+
   // ── Effects ───────────────────────────────────────────────────────────
   useEffect(() => {
     initCanvas();
@@ -1366,6 +1427,35 @@ function CaptureOverlay() {
             }}
           >
             📌
+          </button>
+
+          {/* Save to file */}
+          <button
+            onClick={saveCapture}
+            title="Save as PNG"
+            style={{
+              background: "transparent",
+              border: "1px solid transparent",
+              borderRadius: 6,
+              color: "#e5e7eb",
+              cursor: "pointer",
+              width: 30,
+              height: 30,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+            }}
+          >
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round">
+              {/* Cuerpo del disquete */}
+              <rect x="2" y="2" width="12" height="12" rx="1.5"/>
+              {/* Etiqueta inferior */}
+              <rect x="4.5" y="8.5" width="7" height="4" rx="0.8"/>
+              {/* Ranura superior (área de escritura) */}
+              <rect x="5" y="2" width="5" height="3.5" rx="0.5"/>
+              {/* Tapa de la ranura */}
+              <line x1="8.5" y1="2.5" x2="8.5" y2="5"/>
+            </svg>
           </button>
 
           {/* Confirm capture */}

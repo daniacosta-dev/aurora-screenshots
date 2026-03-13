@@ -31,6 +31,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_clipboard_manager::init())
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data_dir)?;
@@ -77,6 +78,7 @@ pub fn run() {
             commands::pin_screenshot,
             commands::get_pin_image,
             commands::copy_png_to_clipboard,
+            commands::write_screenshot_file,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
