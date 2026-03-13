@@ -589,6 +589,7 @@ function CaptureOverlay() {
   const resizingHandleRef = useRef<HandleId | null>(null);
   const resizeCleanupRef = useRef<(() => void) | null>(null);
   const textInputRef = useRef<HTMLInputElement>(null);
+  const colorPickerPosRef = useRef<{ x: number; y: number } | null>(null);
 
   // Trigger re-render without state change (for toolbar repositioning during resize)
   const [, forceUpdate] = useReducer((x: number) => x + 1, 0);
@@ -600,6 +601,8 @@ function CaptureOverlay() {
   const [textInput, setTextInput] = useState<Pt | null>(null);
   const [textValue, setTextValue] = useState("");
   const [annCount, setAnnCount] = useState(0);
+  const [colorPickerPos, setColorPickerPos] = useState<{ x: number; y: number } | null>(null);
+  const [colorPickerHex, setColorPickerHex] = useState(strokeColor);
 
   // Forzar foco en el input de texto cuando aparece (autoFocus no es confiable en Tauri)
   useEffect(() => {
@@ -746,6 +749,8 @@ function CaptureOverlay() {
     setTextInput(null);
     setTextValue("");
     setAnnCount(0);
+    colorPickerPosRef.current = null;
+    setColorPickerPos(null);
     initCanvas();
     draw();
   }, [initCanvas, draw]);
@@ -958,6 +963,9 @@ function CaptureOverlay() {
   useEffect(() => {
     initCanvas();
     draw();
+    // Para ventanas recién creadas (después de ESC): el background ya está en AppState
+    // pero background-ready y onFocus se perdieron porque React aún no había montado.
+    loadBackground();
 
     const onFocus = () => {
       console.log("[overlay] window focus — phase:", phase.current, "hasFocus:", document.hasFocus());
@@ -994,6 +1002,11 @@ function CaptureOverlay() {
       if (textInputRef.current && document.activeElement === textInputRef.current) return;
 
       if (e.key === "Escape") {
+        if (colorPickerPosRef.current !== null) {
+          colorPickerPosRef.current = null;
+          setColorPickerPos(null);
+          return;
+        }
         reset();
         await closeOverlay();
         return;
@@ -1047,8 +1060,10 @@ function CaptureOverlay() {
   // ── Mouse handlers ────────────────────────────────────────────────────
   const onMouseDown = (e: React.MouseEvent) => {
     if (e.button === 2) {
-      reset();
-      void closeOverlay();
+      setColorPickerHex(strokeColor);
+      const pos = { x: e.clientX, y: e.clientY };
+      colorPickerPosRef.current = pos;
+      setColorPickerPos(pos);
       return;
     }
     if (e.button !== 0) return;
@@ -1472,6 +1487,11 @@ function CaptureOverlay() {
       style={{ position: "fixed", inset: 0, overflow: "hidden", userSelect: "none" }}
       onContextMenu={(e) => e.preventDefault()}
       onMouseDown={(e) => {
+        // Cerrar paleta de colores flotante al hacer click fuera de ella
+        if (colorPickerPosRef.current !== null && e.button === 0) {
+          colorPickerPosRef.current = null;
+          setColorPickerPos(null);
+        }
         // Commitear texto al hacer clic fuera del input
         if (textInput && textInputRef.current && !textInputRef.current.contains(e.target as Node)) {
           commitText();
@@ -1806,6 +1826,95 @@ function CaptureOverlay() {
           <span style={{ color: "#6b7280" }}>ESC cancel</span>
         </div>
       )}
+
+      {/* Paleta de colores flotante (click derecho) */}
+      {colorPickerPos && (() => {
+        const PAD = 8;
+        const W = 160;
+        const H = 148;
+        const left = Math.min(colorPickerPos.x, window.innerWidth  - W - PAD);
+        const top  = colorPickerPos.y + PAD + H > window.innerHeight
+          ? colorPickerPos.y - H - PAD
+          : colorPickerPos.y + PAD;
+        return (
+          <div
+            style={{
+              position: "fixed",
+              left,
+              top,
+              width: W,
+              background: "rgba(18,18,20,0.97)",
+              border: "1px solid rgba(255,255,255,0.12)",
+              borderRadius: 10,
+              padding: 10,
+              boxShadow: "0 8px 32px rgba(0,0,0,0.6)",
+              zIndex: 400,
+            }}
+            onMouseDown={(e) => e.stopPropagation()}
+            onContextMenu={(e) => e.preventDefault()}
+          >
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(6, 1fr)", gap: 5, marginBottom: 8 }}>
+              {PALETTE.map((c) => (
+                <button
+                  key={c}
+                  onClick={() => {
+                    setStrokeColor(c);
+                    colorPickerPosRef.current = null;
+                    setColorPickerPos(null);
+                  }}
+                  style={{
+                    width: 18,
+                    height: 18,
+                    borderRadius: 3,
+                    background: c,
+                    border: strokeColor === c ? "2px solid #fff" : "1px solid rgba(255,255,255,0.2)",
+                    cursor: "pointer",
+                    padding: 0,
+                  }}
+                />
+              ))}
+            </div>
+            <div style={{ display: "flex", gap: 5, alignItems: "center" }}>
+              <div style={{ width: 18, height: 18, borderRadius: 3, background: colorPickerHex, border: "1px solid rgba(255,255,255,0.2)", flexShrink: 0 }} />
+              <input
+                type="text"
+                value={colorPickerHex}
+                spellCheck={false}
+                maxLength={7}
+                onChange={(e) => {
+                  const v = e.target.value;
+                  setColorPickerHex(v);
+                  if (/^#[0-9a-fA-F]{6}$/.test(v)) setStrokeColor(v);
+                }}
+                onKeyDown={(e) => {
+                  e.stopPropagation();
+                  if (e.key === "Enter") {
+                    if (/^#[0-9a-fA-F]{6}$/.test(colorPickerHex)) setStrokeColor(colorPickerHex);
+                    colorPickerPosRef.current = null;
+                    setColorPickerPos(null);
+                  }
+                  if (e.key === "Escape") {
+                    colorPickerPosRef.current = null;
+                    setColorPickerPos(null);
+                  }
+                }}
+                style={{
+                  flex: 1,
+                  background: "rgba(255,255,255,0.07)",
+                  border: "1px solid rgba(255,255,255,0.15)",
+                  borderRadius: 5,
+                  color: "#e5e7eb",
+                  fontSize: 11,
+                  fontFamily: "monospace",
+                  padding: "3px 6px",
+                  outline: "none",
+                  minWidth: 0,
+                }}
+              />
+            </div>
+          </div>
+        );
+      })()}
 
     </div>
   );
