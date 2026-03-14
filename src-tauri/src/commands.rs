@@ -32,8 +32,10 @@ pub fn clear_history(state: State<AppState>) -> Result<(), String> {
 /// Lógica compartida para iniciar la captura de área.
 /// Llamada tanto desde el shortcut global como desde el botón del frontend.
 pub(crate) fn show_capture_overlay(app: &tauri::AppHandle) {
+    // Cerrar la ventana de historial si está abierta. Con ventanas lazy, cerrar es lo
+    // correcto — el tray la recreará cuando el usuario la vuelva a pedir.
     if let Some(win) = app.get_webview_window("main") {
-        let _ = win.hide();
+        let _ = win.close();
     }
 
     let app = app.clone();
@@ -275,16 +277,24 @@ pub fn finalize_area_capture(
     let abs_w = (width as f64 * dpr).round() as u32;
     let abs_h = (height as f64 * dpr).round() as u32;
 
-    // Ocultar overlay antes de capturar para que no aparezca en el resultado
+    // Ungrab inmediato para liberar el input antes de cualquier otra cosa.
     #[cfg(target_os = "linux")]
     if let Err(e) = crate::x11_grab::ungrab_input() {
         eprintln!("ungrab_input: {e}");
     }
-    if let Some(overlay) = app.get_webview_window("capture-overlay") {
-        let _ = overlay.hide();
-    }
 
-    // Esperar a que el overlay desaparezca realmente en pantalla
+    // Cerrar el overlay vía spawn: la respuesta del invoke llega al frontend ANTES
+    // de que la ventana se cierre, evitando que el catch del JS llame hide() y
+    // deshaga el close. El show_capture_overlay ya limpia el XID en su rama None.
+    let app2 = app.clone();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        if let Some(overlay) = app2.get_webview_window("capture-overlay") {
+            let _ = overlay.close();
+        }
+    });
+
+    // Esperar a que el overlay desaparezca realmente en pantalla (200ms > 50ms del spawn).
     std::thread::sleep(std::time::Duration::from_millis(200));
 
     // Capturar la región real del escritorio (X11)
@@ -299,6 +309,11 @@ pub fn finalize_area_capture(
         let db = state.db.lock().map_err(|e| e.to_string())?;
         db::insert_entry(&db, "image", &result.content, Some(&result.thumbnail))
             .map_err(|e| e.to_string())?;
+    }
+
+    // Liberar el screenshot del escritorio: ya no hace falta en AppState.
+    if let Ok(mut bg) = state.desktop_background.lock() {
+        *bg = None;
     }
 
     let _ = app.emit("history-updated", ());
@@ -351,6 +366,10 @@ pub fn close_capture_overlay(state: State<AppState>, app: tauri::AppHandle) -> R
             *xid = None;
         }
     }
+    // Liberar el screenshot del escritorio al cancelar con ESC.
+    if let Ok(mut bg) = state.desktop_background.lock() {
+        *bg = None;
+    }
     let _ = &state; // evita warning de unused en non-linux
     if let Some(overlay) = app.get_webview_window("capture-overlay") {
         let _ = overlay.close();
@@ -358,11 +377,12 @@ pub fn close_capture_overlay(state: State<AppState>, app: tauri::AppHandle) -> R
     Ok(())
 }
 
-/// Oculta la ventana principal desde el frontend.
+/// Cierra (destruye) la ventana principal desde el frontend.
+/// Con ventanas lazy no hay razón para ocultarla — el tray la recreará cuando haga falta.
 #[tauri::command]
 pub fn hide_main_window(app: tauri::AppHandle) -> Result<(), String> {
     if let Some(win) = app.get_webview_window("main") {
-        let _ = win.hide();
+        let _ = win.close();
     }
     Ok(())
 }
@@ -382,14 +402,21 @@ pub fn finalize_annotated_capture(
     app: tauri::AppHandle,
     image_data: String,
 ) -> Result<(), String> {
-    // Ocultar overlay
     #[cfg(target_os = "linux")]
     if let Err(e) = crate::x11_grab::ungrab_input() {
         eprintln!("ungrab_input: {e}");
     }
-    if let Some(overlay) = app.get_webview_window("capture-overlay") {
-        let _ = overlay.hide();
-    }
+
+    // Cerrar el overlay vía spawn para que la respuesta del invoke llegue primero.
+    // Si cerramos síncronamente, el WebKit recibe un error al intentar entregar la
+    // respuesta, entra al catch del JS y llama hide() → el overlay queda vivo.
+    let app2 = app.clone();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        if let Some(overlay) = app2.get_webview_window("capture-overlay") {
+            let _ = overlay.close();
+        }
+    });
 
     // Copiar al portapapeles
     clipboard::copy_png_b64_to_clipboard(&image_data)?;
@@ -403,6 +430,11 @@ pub fn finalize_annotated_capture(
         let db = state.db.lock().map_err(|e| e.to_string())?;
         db::insert_entry(&db, "image", &image_data, Some(&thumbnail))
             .map_err(|e| e.to_string())?;
+    }
+
+    // Liberar el screenshot del escritorio: ya no hace falta en AppState.
+    if let Ok(mut bg) = state.desktop_background.lock() {
+        *bg = None;
     }
 
     let _ = app.emit("history-updated", ());
@@ -485,10 +517,29 @@ pub fn copy_png_to_clipboard(image_data: String) -> Result<(), String> {
 }
 
 /// Escribe un PNG base64 en la ruta indicada por el usuario.
+/// Al terminar cierra el overlay (en background para que el invoke response llegue primero).
 #[tauri::command]
-pub fn write_screenshot_file(path: String, image_data: String) -> Result<(), String> {
+pub fn write_screenshot_file(app: tauri::AppHandle, path: String, image_data: String) -> Result<(), String> {
     let png_bytes = STANDARD.decode(&image_data).map_err(|e| e.to_string())?;
-    std::fs::write(&path, &png_bytes).map_err(|e| e.to_string())
+    std::fs::write(&path, &png_bytes).map_err(|e| e.to_string())?;
+
+    // Cerrar el overlay después de entregar la respuesta al frontend.
+    // No se puede cerrar síncronamente porque el invoke lo llama desde el mismo WebView.
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        #[cfg(target_os = "linux")]
+        {
+            let state = app.state::<AppState>();
+            if let Ok(mut xid) = state.overlay_xid.lock() {
+                *xid = None;
+            }; // `;` suelta el MutexGuard temporal antes de que se destruya `state`
+        }
+        if let Some(overlay) = app.get_webview_window("capture-overlay") {
+            let _ = overlay.close();
+        }
+    });
+
+    Ok(())
 }
 
 // ─── Helpers privados ─────────────────────────────────────────────────────

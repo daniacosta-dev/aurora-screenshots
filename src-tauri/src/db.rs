@@ -39,7 +39,12 @@ pub fn insert_entry(
 
 pub fn get_entries(conn: &Connection, limit: i64) -> Result<Vec<HistoryEntry>> {
     let mut stmt = conn.prepare(
-        "SELECT id, type, content, thumbnail, created_at
+        // Para ítems de tipo 'image', content no se necesita en la lista:
+        // se usa thumbnail para la vista y se carga bajo demanda al copiar.
+        // Esto evita cargar N×varios-MB en memoria de una sola vez.
+        "SELECT id, type,
+                CASE WHEN type = 'text' THEN content ELSE '' END,
+                thumbnail, created_at
          FROM history
          ORDER BY created_at DESC
          LIMIT ?1",

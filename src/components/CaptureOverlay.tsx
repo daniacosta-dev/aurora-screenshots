@@ -583,6 +583,8 @@ function CaptureOverlay() {
   const startPos = useRef<Pt>({ x: 0, y: 0 });
   const endPos = useRef<Pt>({ x: 0, y: 0 });
   const bgImageRef = useRef<HTMLImageElement | null>(null);
+  // Copia del base64 original del escritorio; permite exportFullDesktop sin volver a pedir a Rust.
+  const bgDataRef = useRef<string | null>(null);
   const annotationsRef = useRef<Annotation[]>([]);
   const currentAnnRef = useRef<Annotation | null>(null);
   const isDraggingAnn = useRef(false);
@@ -720,6 +722,7 @@ function CaptureOverlay() {
     try {
       const bg = await invoke<string | null>("get_desktop_background");
       if (bg) {
+        bgDataRef.current = bg;
         const img = new Image();
         img.onload = () => {
           bgImageRef.current = img;
@@ -743,6 +746,7 @@ function CaptureOverlay() {
     resizingHandleRef.current = null;
     if (resizeCleanupRef.current) { resizeCleanupRef.current(); }
     bgImageRef.current = null;
+    bgDataRef.current = null;
     if (canvasRef.current) canvasRef.current.style.cursor = "crosshair";
     setDisplayPhase("idle");
     setActiveTool(null);
@@ -816,17 +820,10 @@ function CaptureOverlay() {
     }
     ctx.restore();
 
-    // Export to base64
-    const blob = await new Promise<Blob | null>((resolve) =>
-      offscreen.toBlob(resolve, "image/png")
-    );
-    if (!blob) return;
-
-    const ab = await blob.arrayBuffer();
-    const bytes = new Uint8Array(ab);
-    let binary = "";
-    for (let i = 0; i < bytes.byteLength; i++) binary += String.fromCharCode(bytes[i]);
-    const base64 = btoa(binary);
+    // Export to base64 — toDataURL evita la cadena Blob→ArrayBuffer→Uint8Array→btoa
+    const dataUrl = offscreen.toDataURL("image/png");
+    offscreen.width = 0; // libera el buffer del canvas inmediatamente
+    const base64 = dataUrl.slice("data:image/png;base64,".length);
 
     reset();
     await new Promise<void>((r) => requestAnimationFrame(() => r()));
@@ -842,7 +839,8 @@ function CaptureOverlay() {
   // Ctrl+C sin selección: copiar el escritorio completo
   const exportFullDesktop = useCallback(async () => {
     try {
-      const bg = await invoke<string | null>("get_desktop_background");
+      // Usar el base64 ya cargado en memoria; no volver a pedirlo a Rust.
+      const bg = bgDataRef.current;
       if (!bg) return;
       await invoke("finalize_annotated_capture", { imageData: bg });
       reset();
@@ -880,25 +878,21 @@ function CaptureOverlay() {
     for (const ann of annotationsRef.current) drawAnnotation(ctx, ann, dpr);
     ctx.restore();
 
-    const blob = await new Promise<Blob | null>((resolve) => offscreen.toBlob(resolve, "image/png"));
-    if (!blob) return;
-    const ab = await blob.arrayBuffer();
-    const bytes = new Uint8Array(ab);
-    let binary = "";
-    for (let i = 0; i < bytes.byteLength; i++) binary += String.fromCharCode(bytes[i]);
-    const base64 = btoa(binary);
+    const dataUrl = offscreen.toDataURL("image/png");
+    offscreen.width = 0; // libera el buffer del canvas inmediatamente
+    const base64 = dataUrl.slice("data:image/png;base64,".length);
 
     reset();
     await new Promise<void>((r) => requestAnimationFrame(() => r()));
 
     try {
       await invoke("pin_screenshot", { imageData: base64, width: Math.round(sw), height: Math.round(sh) });
-      await hideOverlay();
+      await closeOverlay();
     } catch (err) {
       console.error("Error al pinear captura:", err);
-      await hideOverlay();
+      await closeOverlay();
     }
-  }, [reset, hideOverlay]);
+  }, [reset, closeOverlay]);
 
   // ── Save to file ──────────────────────────────────────────────────────
   const saveCapture = useCallback(async () => {
@@ -927,13 +921,9 @@ function CaptureOverlay() {
     for (const ann of annotationsRef.current) drawAnnotation(ctx, ann, dpr);
     ctx.restore();
 
-    const blob = await new Promise<Blob | null>((resolve) => offscreen.toBlob(resolve, "image/png"));
-    if (!blob) return;
-    const ab = await blob.arrayBuffer();
-    const bytes = new Uint8Array(ab);
-    let binary = "";
-    for (let i = 0; i < bytes.byteLength; i++) binary += String.fromCharCode(bytes[i]);
-    const base64 = btoa(binary);
+    const dataUrl = offscreen.toDataURL("image/png");
+    offscreen.width = 0; // libera el buffer del canvas inmediatamente
+    const base64 = dataUrl.slice("data:image/png;base64,".length);
 
     // Ocultar overlay ANTES del diálogo para que aparezca encima (override_redirect cubre todo)
     reset();
