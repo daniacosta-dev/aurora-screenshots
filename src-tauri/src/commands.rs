@@ -33,8 +33,9 @@ pub fn clear_history(state: State<AppState>) -> Result<(), String> {
 /// Lógica compartida para iniciar la captura de área.
 /// Llamada tanto desde el shortcut global como desde el botón del frontend.
 pub(crate) fn show_capture_overlay(app: &tauri::AppHandle) {
-    // Cerrar la ventana de historial si está abierta. Con ventanas lazy, cerrar es lo
-    // correcto — el tray la recreará cuando el usuario la vuelva a pedir.
+    // Cerrar la ventana de historial al iniciar captura: libera el proceso WebKit
+    // para que el overlay no tenga que competir con él (evita 2 procesos simultáneos).
+    // El historial se mantiene caliente solo entre aperturas del tray (hide_main_window).
     if let Some(win) = app.get_webview_window("main") {
         let _ = win.close();
     }
@@ -287,9 +288,8 @@ pub fn finalize_area_capture(
         eprintln!("ungrab_input: {e}");
     }
 
-    // Cerrar el overlay vía spawn: la respuesta del invoke llega al frontend ANTES
-    // de que la ventana se cierre, evitando que el catch del JS llame hide() y
-    // deshaga el close. El show_capture_overlay ya limpia el XID en su rama None.
+    // Destruir el overlay después del export: la captura terminó, liberar memoria.
+    // El overlay se mantiene vivo (hide) solo después de ESC para retry inmediato.
     let app2 = app.clone();
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -465,9 +465,8 @@ pub fn finalize_annotated_capture(
         eprintln!("ungrab_input: {e}");
     }
 
-    // Cerrar el overlay vía spawn para que la respuesta del invoke llegue primero.
-    // Si cerramos síncronamente, el WebKit recibe un error al intentar entregar la
-    // respuesta, entra al catch del JS y llama hide() → el overlay queda vivo.
+    // Destruir el overlay después del export: la captura terminó, liberar memoria.
+    // El overlay se mantiene vivo (hide) solo después de ESC para retry inmediato.
     let app2 = app.clone();
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -581,8 +580,8 @@ pub fn write_screenshot_file(app: tauri::AppHandle, path: String, image_data: St
     let png_bytes = STANDARD.decode(&image_data).map_err(|e| e.to_string())?;
     std::fs::write(&path, &png_bytes).map_err(|e| e.to_string())?;
 
-    // Cerrar el overlay después de entregar la respuesta al frontend.
-    // No se puede cerrar síncronamente porque el invoke lo llama desde el mismo WebView.
+    // Destruir el overlay después de guardar el archivo: captura terminada, liberar memoria.
+    // El XID se puede invalidar aquí porque el overlay se va a recrear en la próxima captura.
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         #[cfg(target_os = "linux")]
@@ -590,7 +589,7 @@ pub fn write_screenshot_file(app: tauri::AppHandle, path: String, image_data: St
             let state = app.state::<AppState>();
             if let Ok(mut xid) = state.overlay_xid.lock() {
                 *xid = None;
-            }; // `;` suelta el MutexGuard temporal antes de que se destruya `state`
+            };
         }
         if let Some(overlay) = app.get_webview_window("capture-overlay") {
             let _ = overlay.close();
