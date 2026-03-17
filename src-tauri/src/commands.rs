@@ -81,10 +81,13 @@ pub(crate) fn show_capture_overlay(app: &tauri::AppHandle) {
                 let bg_data = bg_task.await.ok().and_then(|r| r.ok());
                 eprintln!("[show_overlay] bg capture done, has_bg={}", bg_data.is_some());
 
-                if let Some(ref bg) = bg_data {
+                // Mover (no clonar) el string al AppState para evitar tener el original
+                // y la copia vivos al mismo tiempo (~15-20 MB de diferencia en pico).
+                let has_bg = bg_data.is_some();
+                if let Some(bg) = bg_data {
                     let state = app.state::<AppState>();
                     if let Ok(mut bg_lock) = state.desktop_background.lock() {
-                        *bg_lock = Some(bg.clone());
+                        *bg_lock = Some(bg);
                     };
                 }
 
@@ -163,7 +166,7 @@ pub(crate) fn show_capture_overlay(app: &tauri::AppHandle) {
                     eprintln!("[show_overlay] calling overlay.show()");
                     let _ = overlay.show();
 
-                    if bg_data.is_some() {
+                    if has_bg {
                         let _ = overlay.emit("background-ready", ());
                     }
 
@@ -388,10 +391,13 @@ pub fn hide_main_window(app: tauri::AppHandle) -> Result<(), String> {
 }
 
 /// Retorna el screenshot del escritorio capturado antes de mostrar el overlay.
+/// Usa take() en lugar de clone() para mover el String fuera del AppState:
+/// evita tener dos copias de ~15-20 MB vivas durante el IPC.
+/// Después de esta llamada desktop_background queda en None — el frontend ya tiene el dato.
 #[tauri::command]
 pub fn get_desktop_background(state: State<AppState>) -> Result<Option<String>, String> {
-    let bg = state.desktop_background.lock().map_err(|e| e.to_string())?;
-    Ok(bg.clone())
+    let mut bg = state.desktop_background.lock().map_err(|e| e.to_string())?;
+    Ok(bg.take())
 }
 
 /// El frontend llama a este comando con el PNG anotado (base64) para guardarlo y

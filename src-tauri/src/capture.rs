@@ -145,8 +145,6 @@ pub fn capture_full_desktop_x11(
         imageops::replace(&mut canvas, &monitor_img, dest_x, dest_y);
     }
 
-    // Comprimir con nivel Fast (deflate 1) en lugar del default (deflate 6).
-    // Para el fondo del overlay no necesitamos máxima compresión, sí máxima velocidad.
     let mut buf = Cursor::new(Vec::new());
     PngEncoder::new_with_quality(&mut buf, CompressionType::Fast, FilterType::Sub)
         .write_image(
@@ -156,6 +154,9 @@ pub fn capture_full_desktop_x11(
             image::ExtendedColorType::Rgba8,
         )
         .map_err(|e| CaptureError::ImageProcessing(format!("PNG fast encode error: {e}")))?;
+
+    // Liberar el canvas RGBA (~8 MB) antes de alocar el string base64.
+    drop(canvas);
 
     Ok(STANDARD.encode(buf.into_inner()))
 }
@@ -173,16 +174,23 @@ pub fn generate_thumbnail_b64(png_bytes: &[u8]) -> Result<String, CaptureError> 
 }
 
 fn process_image(img: DynamicImage, width: u32, height: u32) -> Result<CaptureResult, CaptureError> {
+    // Generar miniatura primero (antes de liberar img).
+    let thumb = img.thumbnail(240, 160);
+
+    // Encodear imagen completa a PNG y liberar los píxeles RGBA crudos antes de crear
+    // el string base64. Sin el drop, img + PNG buffer + base64 string están vivos juntos.
     let mut full_buf = Cursor::new(Vec::new());
     img.write_to(&mut full_buf, ImageFormat::Png)
         .map_err(|e| CaptureError::ImageProcessing(format!("PNG encode error: {e}")))?;
+    drop(img);
     let content = STANDARD.encode(full_buf.into_inner());
 
-    let thumb = img.thumbnail(240, 160);
+    // Mismo patrón para el thumbnail.
     let mut thumb_buf = Cursor::new(Vec::new());
     thumb
         .write_to(&mut thumb_buf, ImageFormat::Png)
         .map_err(|e| CaptureError::ImageProcessing(format!("Thumbnail encode error: {e}")))?;
+    drop(thumb);
     let thumbnail = STANDARD.encode(thumb_buf.into_inner());
 
     Ok(CaptureResult { content, thumbnail, width, height })

@@ -6,6 +6,7 @@ import { useHistoryStore } from "./store";
 import HistoryList from "./components/HistoryList";
 import CaptureOverlay from "./components/CaptureOverlay";
 import PinView from "./components/PinView";
+import { X } from "lucide-react";
 import "./App.css";
 
 const windowLabel = getCurrentWindow().label;
@@ -47,10 +48,10 @@ function HistoryApp() {
           <span className="text-xs text-gray-600">history</span>
           <button
             onClick={() => invoke("hide_main_window")}
-            className="text-gray-600 hover:text-gray-300 transition-colors text-xs leading-none w-5 h-5 flex items-center justify-center rounded hover:bg-gray-800"
+            className="text-gray-600 hover:text-gray-300 transition-colors w-5 h-5 flex items-center justify-center rounded hover:bg-gray-800"
             title="Close"
           >
-            ×
+            <X size={13} />
           </button>
         </div>
       </header>
