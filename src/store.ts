@@ -59,7 +59,7 @@ export const useHistoryStore = create<HistoryStore>((set, get) => ({
     const hasItems = get().items.length > 0;
     if (!hasItems) set({ isLoading: true, error: null });
     try {
-      const items = await invoke<HistoryItem[]>("get_history", { limit: 100 });
+      const items = await invoke<HistoryItem[]>("get_history", { limit: 10 });
       set({ items, isLoading: false });
     } catch (err) {
       set({ error: String(err), isLoading: false });

@@ -44,6 +44,8 @@ pub fn set_setting(conn: &Connection, key: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
+const HISTORY_LIMIT: i64 = 10;
+
 pub fn insert_entry(
     conn: &Connection,
     entry_type: &str,
@@ -54,10 +56,19 @@ pub fn insert_entry(
         "INSERT INTO history (type, content, thumbnail) VALUES (?1, ?2, ?3)",
         params![entry_type, content, thumbnail],
     )?;
-    Ok(conn.last_insert_rowid())
+    let id = conn.last_insert_rowid();
+    // Eliminar entradas antiguas que superen el límite
+    conn.execute(
+        "DELETE FROM history WHERE id NOT IN (
+            SELECT id FROM history ORDER BY created_at DESC LIMIT ?1
+        )",
+        params![HISTORY_LIMIT],
+    )?;
+    Ok(id)
 }
 
-pub fn get_entries(conn: &Connection, limit: i64) -> Result<Vec<HistoryEntry>> {
+pub fn get_entries(conn: &Connection, _limit: i64) -> Result<Vec<HistoryEntry>> {
+    let limit = HISTORY_LIMIT;
     let mut stmt = conn.prepare(
         // Para ítems de tipo 'image', content no se necesita en la lista:
         // se usa thumbnail para la vista y se carga bajo demanda al copiar.

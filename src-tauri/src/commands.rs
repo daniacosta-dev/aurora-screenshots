@@ -225,15 +225,23 @@ pub(crate) fn show_capture_overlay(app: &tauri::AppHandle) {
                 // Para Wayland el portal maneja la selección interactiva
                 match capture::capture_area_wayland_interactive().await {
                     Ok(result) => {
-                        if let Err(e) = clipboard::copy_png_b64_to_clipboard(&result.content) {
+                        let png_bytes = match STANDARD.decode(&result.content) {
+                            Ok(b) => b,
+                            Err(e) => { eprintln!("Error decodificando captura Wayland: {e}"); return; }
+                        };
+                        if let Err(e) = clipboard::copy_png_bytes_to_clipboard(&png_bytes) {
                             eprintln!("Error copiando al clipboard (Wayland): {e}");
                         }
+                        let path = match save_png_bytes_to_disk(&png_bytes) {
+                            Ok(p) => p,
+                            Err(e) => { eprintln!("Error guardando captura Wayland: {e}"); return; }
+                        };
                         let state = app.state::<AppState>();
                         if let Ok(db) = state.db.lock() {
                             let _ = db::insert_entry(
                                 &db,
                                 "image",
-                                &result.content,
+                                &path,
                                 Some(&result.thumbnail),
                             );
                         }
@@ -305,13 +313,19 @@ pub fn finalize_area_capture(
     let result = capture::capture_region_x11(abs_x, abs_y, abs_w, abs_h)
         .map_err(|e| e.to_string())?;
 
-    // Copiar al portapapeles del sistema
-    clipboard::copy_png_b64_to_clipboard(&result.content)?;
+    // Decodificar una sola vez: sirve para clipboard y para escribir a disco.
+    let png_bytes = STANDARD.decode(&result.content).map_err(|e| e.to_string())?;
 
-    // Guardar en DB
+    // Copiar al portapapeles del sistema
+    clipboard::copy_png_bytes_to_clipboard(&png_bytes)?;
+
+    // Guardar PNG en ~/Pictures/screenshots/aurora-screenshots/
+    let path = save_png_bytes_to_disk(&png_bytes)?;
+
+    // Guardar path en DB (ya no el base64 completo)
     {
         let db = state.db.lock().map_err(|e| e.to_string())?;
-        db::insert_entry(&db, "image", &result.content, Some(&result.thumbnail))
+        db::insert_entry(&db, "image", &path, Some(&result.thumbnail))
             .map_err(|e| e.to_string())?;
     }
 
@@ -335,7 +349,16 @@ pub fn copy_history_item(state: State<AppState>, id: i64) -> Result<(), String> 
 
     match entry.entry_type.as_str() {
         "text" => clipboard::copy_text_to_clipboard(&entry.content),
-        "image" => clipboard::copy_png_b64_to_clipboard(&entry.content),
+        "image" => {
+            if entry.content.starts_with('/') {
+                // Nuevo formato: content es un path en disco
+                let png_bytes = std::fs::read(&entry.content).map_err(|e| e.to_string())?;
+                clipboard::copy_png_bytes_to_clipboard(&png_bytes)
+            } else {
+                // Formato legacy: content es base64
+                clipboard::copy_png_b64_to_clipboard(&entry.content)
+            }
+        }
         other => Err(format!("Tipo de item desconocido: {other}")),
     }
 }
@@ -475,17 +498,22 @@ pub fn finalize_annotated_capture(
         }
     });
 
+    // Decodificar una sola vez: clipboard, disco y thumbnail.
+    let png_bytes = STANDARD.decode(&image_data).map_err(|e| e.to_string())?;
+
     // Copiar al portapapeles
-    clipboard::copy_png_b64_to_clipboard(&image_data)?;
+    clipboard::copy_png_bytes_to_clipboard(&png_bytes)?;
+
+    // Guardar PNG en ~/Pictures/screenshots/aurora-screenshots/
+    let path = save_png_bytes_to_disk(&png_bytes)?;
 
     // Generar miniatura
-    let png_bytes = STANDARD.decode(&image_data).map_err(|e| e.to_string())?;
     let thumbnail = capture::generate_thumbnail_b64(&png_bytes).map_err(|e| e.to_string())?;
 
-    // Guardar en DB
+    // Guardar path en DB (ya no el base64 completo)
     {
         let db = state.db.lock().map_err(|e| e.to_string())?;
-        db::insert_entry(&db, "image", &image_data, Some(&thumbnail))
+        db::insert_entry(&db, "image", &path, Some(&thumbnail))
             .map_err(|e| e.to_string())?;
     }
 
@@ -599,5 +627,38 @@ pub fn write_screenshot_file(app: tauri::AppHandle, path: String, image_data: St
     Ok(())
 }
 
+/// Abre ~/Pictures/aurora-screenshots en el gestor de archivos del sistema.
+#[tauri::command]
+pub fn open_screenshots_folder() -> Result<(), String> {
+    let dir = get_screenshots_dir()?;
+    let path_str = dir.to_str().ok_or("Ruta no válida UTF-8")?;
+    tauri_plugin_opener::open_path(path_str, None::<&str>).map_err(|e| e.to_string())
+}
+
 // ─── Helpers privados ─────────────────────────────────────────────────────
+
+/// Retorna (creando si no existe) ~/Pictures/screenshots/aurora-screenshots.
+fn get_screenshots_dir() -> Result<std::path::PathBuf, String> {
+    let home = std::env::var("HOME").map_err(|e| e.to_string())?;
+    let dir = std::path::Path::new(&home)
+        .join("Pictures")
+        .join("aurora-screenshots");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    Ok(dir)
+}
+
+/// Escribe bytes PNG en ~/Pictures/screenshots/aurora-screenshots/aurora_<ms>.png
+/// y retorna la ruta absoluta como String.
+fn save_png_bytes_to_disk(png_bytes: &[u8]) -> Result<String, String> {
+    let dir = get_screenshots_dir()?;
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let path = dir.join(format!("aurora_{ts}.png"));
+    std::fs::write(&path, png_bytes).map_err(|e| e.to_string())?;
+    path.to_str()
+        .map(|s| s.to_string())
+        .ok_or_else(|| "Ruta no válida UTF-8".to_string())
+}
 

@@ -1,6 +1,7 @@
+import { invoke } from "@tauri-apps/api/core";
 import { useHistoryStore, useSettingsStore } from "../store";
 import HistoryItemCard from "./HistoryItem";
-import { Clipboard, Camera, Trash2 } from "lucide-react";
+import { Clipboard, Camera, Trash2, FolderOpen } from "lucide-react";
 
 function HistoryList() {
   const { items, isLoading, error, captureScreenshot, clearHistory } =
@@ -74,6 +75,14 @@ function HistoryList() {
           >
             <Camera size={12} />
             Capturar
+          </button>
+          <button
+            onClick={() => invoke("open_screenshots_folder")}
+            className="flex items-center gap-1 text-xs text-gray-400 hover:text-blue-400 transition-colors"
+            title="Abrir carpeta de capturas"
+          >
+            <FolderOpen size={12} />
+            Abrir carpeta
           </button>
           <button
             onClick={clearHistory}

@@ -85,6 +85,7 @@ pub fn run() {
             commands::get_pin_image,
             commands::copy_png_to_clipboard,
             commands::write_screenshot_file,
+            commands::open_screenshots_folder,
         ])
         .build(tauri::generate_context!())
         .expect("error while running tauri application")
