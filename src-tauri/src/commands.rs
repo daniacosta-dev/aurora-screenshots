@@ -68,30 +68,20 @@ pub(crate) fn show_capture_overlay(app: &tauri::AppHandle) {
                     };
                 }
 
-                // Esperar a que el menú del tray (o la ventana principal) se cierre
-                // completamente antes de capturar el escritorio.
-                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                // El menú del tray cierra en ~30ms. 100ms es suficiente margen sin
+                // agregar latencia innecesaria al usuario.
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
+                // Arrancar la captura del fondo en paralelo con la preparación de la ventana.
+                // Así no pagamos ambos costos en secuencia.
                 let bg_task = tokio::task::spawn_blocking(move || {
                     capture::capture_full_desktop_x11(min_x, min_y, total_w, total_h)
                 });
 
-                tokio::time::sleep(std::time::Duration::from_millis(80)).await;
-
-                let bg_data = bg_task.await.ok().and_then(|r| r.ok());
-                eprintln!("[show_overlay] bg capture done, has_bg={}", bg_data.is_some());
-
-                // Mover (no clonar) el string al AppState para evitar tener el original
-                // y la copia vivos al mismo tiempo (~15-20 MB de diferencia en pico).
-                let has_bg = bg_data.is_some();
-                if let Some(bg) = bg_data {
-                    let state = app.state::<AppState>();
-                    if let Ok(mut bg_lock) = state.desktop_background.lock() {
-                        *bg_lock = Some(bg);
-                    };
-                }
-
-                // Obtener la ventana overlay existente, o crear una nueva si fue cerrada (ESC).
+                // Preparar la ventana overlay MIENTRAS la captura corre en background.
+                // En el caso reuse (ventana ya existe) esto toma ~5ms.
+                // En el caso create (ESC previo) toma ~100ms — pero la captura también tarda
+                // ~100-200ms, así que ambas terminan aproximadamente al mismo tiempo.
                 let overlay = match app.get_webview_window("capture-overlay") {
                     Some(w) => w,
                     None => {
@@ -125,54 +115,64 @@ pub(crate) fn show_capture_overlay(app: &tauri::AppHandle) {
                         }
                     }
                 };
+
                 let _ = overlay.set_position(tauri::Position::Physical(
-                        tauri::PhysicalPosition::new(min_x, min_y),
-                    ));
-                    let _ = overlay.set_size(tauri::Size::Physical(
-                        tauri::PhysicalSize::new(total_w, total_h),
-                    ));
+                    tauri::PhysicalPosition::new(min_x, min_y),
+                ));
+                let _ = overlay.set_size(tauri::Size::Physical(
+                    tauri::PhysicalSize::new(total_w, total_h),
+                ));
 
-                    // Intentar obtener el XID antes del show() para poder aplicar
-                    // override_redirect mientras la ventana está desmapeada.
-                    // En la primera captura window_handle() falla (ventana no realizada aún)
-                    // → usamos el XID guardado de capturas previas si existe.
-                    #[cfg(target_os = "linux")]
-                    let xid_pre: Option<u32> = {
-                        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-                        let fresh = match overlay.window_handle() {
-                            Ok(handle) => match handle.as_raw() {
-                                RawWindowHandle::Xcb(h) => Some(h.window.get()),
-                                RawWindowHandle::Xlib(h) => Some(h.window as u32),
-                                _ => None,
-                            },
-                            Err(_) => None,
-                        };
-                        let state = app.state::<AppState>();
-                        if let Some(id) = fresh {
-                            if let Ok(mut stored) = state.overlay_xid.lock() { *stored = Some(id); }
-                            Some(id)
-                        } else {
-                            state.overlay_xid.lock().ok().and_then(|g| *g)
-                        }
+                // Obtener XID e intentar override_redirect mientras la captura aún corre.
+                // override_redirect debe aplicarse con la ventana desmapeada (antes del show).
+                #[cfg(target_os = "linux")]
+                let xid_pre: Option<u32> = {
+                    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+                    let fresh = match overlay.window_handle() {
+                        Ok(handle) => match handle.as_raw() {
+                            RawWindowHandle::Xcb(h) => Some(h.window.get()),
+                            RawWindowHandle::Xlib(h) => Some(h.window as u32),
+                            _ => None,
+                        },
+                        Err(_) => None,
                     };
-
-                    // override_redirect ANTES del show() — solo funciona en ventana desmapeada.
-                    // En la primera captura xid_pre puede ser None (primera vez que se muestra).
-                    #[cfg(target_os = "linux")]
-                    if let Some(xid) = xid_pre {
-                        crate::x11_grab::set_override_redirect(xid);
+                    let state = app.state::<AppState>();
+                    if let Some(id) = fresh {
+                        if let Ok(mut stored) = state.overlay_xid.lock() { *stored = Some(id); }
+                        Some(id)
+                    } else {
+                        state.overlay_xid.lock().ok().and_then(|g| *g)
                     }
+                };
 
-                    eprintln!("[show_overlay] calling overlay.show()");
-                    let _ = overlay.show();
+                #[cfg(target_os = "linux")]
+                if let Some(xid) = xid_pre {
+                    crate::x11_grab::set_override_redirect(xid);
+                }
 
-                    if has_bg {
-                        let _ = overlay.emit("background-ready", ());
-                    }
+                // Ahora sí esperamos el fondo. Como la preparación de la ventana ya consumió
+                // ~5-100ms, la captura probablemente terminó o está por terminar.
+                // Sin el sleep de 80ms que había antes (era tiempo muerto).
+                let bg_data = bg_task.await.ok().and_then(|r| r.ok());
+                eprintln!("[show_overlay] bg capture done, has_bg={}", bg_data.is_some());
 
-                    // Esperar a que X11 mapee la ventana. Después del show() GTK realiza
-                    // el X11 window, así que window_handle() funciona aunque haya fallado antes.
-                    tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+                let has_bg = bg_data.is_some();
+                if let Some(bg) = bg_data {
+                    let state = app.state::<AppState>();
+                    if let Ok(mut bg_lock) = state.desktop_background.lock() {
+                        *bg_lock = Some(bg);
+                    };
+                }
+
+                eprintln!("[show_overlay] calling overlay.show()");
+                let _ = overlay.show();
+
+                if has_bg {
+                    let _ = overlay.emit("background-ready", ());
+                }
+
+                // X11 mapea la ventana rápido. 30ms es suficiente en lugar de 60ms.
+                tokio::time::sleep(std::time::Duration::from_millis(30)).await;
 
                     // Si en la primera captura no teníamos XID, intentar obtenerlo ahora.
                     #[cfg(target_os = "linux")]
@@ -376,6 +376,19 @@ pub fn close_capture_overlay(state: State<AppState>, app: tauri::AppHandle) -> R
     let _ = &state; // evita warning de unused en non-linux
     if let Some(overlay) = app.get_webview_window("capture-overlay") {
         let _ = overlay.close();
+    }
+    Ok(())
+}
+
+/// Muestra la ventana principal. Llamado por el frontend cuando React ya está montado,
+/// para evitar el flash de pantalla blanca al abrir el historial por primera vez.
+#[tauri::command]
+pub fn show_main_window(app: tauri::AppHandle) -> Result<(), String> {
+    if let Some(win) = app.get_webview_window("main") {
+        let _ = win.set_always_on_top(true);
+        let _ = win.show();
+        let _ = win.set_focus();
+        let _ = win.set_always_on_top(false);
     }
     Ok(())
 }

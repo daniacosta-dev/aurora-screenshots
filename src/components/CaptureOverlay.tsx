@@ -441,145 +441,6 @@ const PALETTE: string[] = [
   "#00c7be", "#32ade6", "#6e6e73", "#aeaeb2", "#ffffff", "#000000",
 ];
 
-// Selector de color personalizado — sin input[type=color] nativo (rompe XGrabKeyboard).
-function ColorPicker({
-  value,
-  onChange,
-}: {
-  value: string;
-  onChange: (c: string) => void;
-}) {
-  const [open, setOpen] = useState(false);
-  const [hex, setHex] = useState(value);
-  const ref = useRef<HTMLDivElement>(null);
-
-  // Sincronizar hex input cuando cambia el color externamente
-  useEffect(() => { setHex(value); }, [value]);
-
-  // Cerrar al hacer click fuera
-  useEffect(() => {
-    if (!open) return;
-    const onDown = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
-    };
-    window.addEventListener("mousedown", onDown);
-    return () => window.removeEventListener("mousedown", onDown);
-  }, [open]);
-
-  const commit = (c: string) => {
-    onChange(c);
-    setHex(c);
-    setOpen(false);
-  };
-
-  return (
-    <div ref={ref} style={{ position: "relative" }} onMouseDown={(e) => e.stopPropagation()}>
-      {/* Swatch botón */}
-      <button
-        onClick={() => setOpen((o) => !o)}
-        title="Custom color"
-        style={{
-          width: 30,
-          height: 30,
-          borderRadius: 6,
-          background: open ? "rgba(255,255,255,0.12)" : "transparent",
-          border: open ? "1px solid rgba(255,255,255,0.5)" : "1px solid transparent",
-          cursor: "pointer",
-          padding: 0,
-          flexShrink: 0,
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          gap: 3,
-        }}
-      >
-        {/* Color swatch + pencil icon */}
-        <span style={{
-          width: 12,
-          height: 12,
-          borderRadius: 3,
-          background: value,
-          border: "1.5px solid rgba(255,255,255,0.4)",
-          display: "inline-block",
-          flexShrink: 0,
-        }} />
-        <svg width="11" height="11" viewBox="0 0 12 12" fill="none" stroke="#e5e7eb" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round">
-          <path d="M8.5 1.5l2 2-6 6H2.5v-2l6-6z"/>
-        </svg>
-      </button>
-      {/* Popover */}
-      {open && (
-        <div
-          style={{
-            position: "absolute",
-            bottom: "calc(100% + 8px)",
-            left: "50%",
-            transform: "translateX(-50%)",
-            background: "rgba(18,18,20,0.97)",
-            border: "1px solid rgba(255,255,255,0.12)",
-            borderRadius: 10,
-            padding: "10px",
-            boxShadow: "0 8px 32px rgba(0,0,0,0.6)",
-            zIndex: 300,
-            width: 156,
-          }}
-          onMouseDown={(e) => e.stopPropagation()}
-        >
-          {/* Paleta */}
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(6, 1fr)", gap: 5, marginBottom: 8 }}>
-            {PALETTE.map((c) => (
-              <button
-                key={c}
-                onClick={() => commit(c)}
-                style={{
-                  width: 18,
-                  height: 18,
-                  borderRadius: 3,
-                  background: c,
-                  border: value === c ? "2px solid #fff" : "1px solid rgba(255,255,255,0.2)",
-                  cursor: "pointer",
-                  padding: 0,
-                }}
-              />
-            ))}
-          </div>
-          {/* Hex input */}
-          <div style={{ display: "flex", gap: 5, alignItems: "center" }}>
-            <div style={{ width: 18, height: 18, borderRadius: 3, background: hex, border: "1px solid rgba(255,255,255,0.2)", flexShrink: 0 }} />
-            <input
-              type="text"
-              value={hex}
-              spellCheck={false}
-              maxLength={7}
-              onChange={(e) => {
-                const v = e.target.value;
-                setHex(v);
-                if (/^#[0-9a-fA-F]{6}$/.test(v)) onChange(v);
-              }}
-              onKeyDown={(e) => {
-                e.stopPropagation();
-                if (e.key === "Enter") commit(hex);
-                if (e.key === "Escape") setOpen(false);
-              }}
-              style={{
-                flex: 1,
-                background: "rgba(255,255,255,0.07)",
-                border: "1px solid rgba(255,255,255,0.18)",
-                borderRadius: 4,
-                color: "#e5e7eb",
-                fontSize: 11,
-                padding: "2px 5px",
-                fontFamily: "monospace",
-                outline: "none",
-                width: 0,
-              }}
-            />
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
 
 function CaptureOverlay() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -607,8 +468,10 @@ function CaptureOverlay() {
   const [textInput, setTextInput] = useState<Pt | null>(null);
   const [textValue, setTextValue] = useState("");
   const [annCount, setAnnCount] = useState(0);
-  const [colorPickerPos, setColorPickerPos] = useState<{ x: number; y: number } | null>(null);
+  const [colorPickerPos, setColorPickerPos] = useState<{ x: number; y: number; above?: boolean } | null>(null);
   const [colorPickerHex, setColorPickerHex] = useState(strokeColor);
+  const [hoveredTool, setHoveredTool] = useState<Tool | null>(null);
+  const [hoveredSize, setHoveredSize] = useState<number | null>(null);
 
   // Forzar foco en el input de texto cuando aparece (autoFocus no es confiable en Tauri)
   useEffect(() => {
@@ -1488,16 +1351,21 @@ function CaptureOverlay() {
         >
           {/* ── Row 1: Annotation tools ── */}
           <div style={{ display: "flex", alignItems: "center", gap: 3, padding: "7px 10px" }}>
-            {toolDefs.map(({ tool, icon, title, key }) => (
+            {toolDefs.map(({ tool, icon, title, key }) => {
+              const isActive = activeTool === tool;
+              const isHov = hoveredTool === tool && !isActive;
+              return (
               <button
                 key={tool}
-                onClick={() => setActiveTool(activeTool === tool ? null : tool)}
+                onClick={() => setActiveTool(isActive ? null : tool)}
+                onMouseEnter={() => setHoveredTool(tool)}
+                onMouseLeave={() => setHoveredTool(null)}
                 title={title}
                 style={{
-                  background: activeTool === tool ? "rgba(74,222,128,0.18)" : "transparent",
-                  border: activeTool === tool ? "1px solid #4ade80" : "1px solid transparent",
+                  background: isActive ? "rgba(74,222,128,0.18)" : isHov ? "rgba(255,255,255,0.07)" : "transparent",
+                  border: isActive ? "1px solid #4ade80" : isHov ? "1px solid rgba(255,255,255,0.12)" : "1px solid transparent",
                   borderRadius: 6,
-                  color: activeTool === tool ? "#4ade80" : "#d1d5db",
+                  color: isActive ? "#4ade80" : isHov ? "#e5e7eb" : "#d1d5db",
                   cursor: "pointer",
                   width: 28,
                   height: 32,
@@ -1511,6 +1379,7 @@ function CaptureOverlay() {
                   flexShrink: 0,
                   position: "relative",
                   paddingBottom: 2,
+                  transition: "background 0.1s, border-color 0.1s, color 0.1s",
                 }}
               >
                 <span style={{
@@ -1534,7 +1403,8 @@ function CaptureOverlay() {
                   {key}
                 </span>
               </button>
-            ))}
+              );
+            })}
 
             <div style={{ width: 1, height: 20, background: "rgba(255,255,255,0.1)", margin: "0 4px", flexShrink: 0 }} />
 
@@ -1543,6 +1413,7 @@ function CaptureOverlay() {
               <button
                 key={c}
                 onClick={() => setStrokeColor(c)}
+                className="ov-preset-btn"
                 style={{
                   width: 15,
                   height: 15,
@@ -1556,31 +1427,82 @@ function CaptureOverlay() {
               />
             ))}
 
-            <ColorPicker value={strokeColor} onChange={setStrokeColor} />
+            <button
+              onMouseDown={(e) => {
+                e.stopPropagation();
+                if (colorPickerPosRef.current !== null) {
+                  colorPickerPosRef.current = null;
+                  setColorPickerPos(null);
+                } else {
+                  const rect = e.currentTarget.getBoundingClientRect();
+                  setColorPickerHex(strokeColor);
+                  const above = rect.top > window.innerHeight / 2;
+                  const pos = { x: rect.left + rect.width / 2, y: above ? rect.top : rect.bottom, above };
+                  colorPickerPosRef.current = pos;
+                  setColorPickerPos(pos);
+                }
+              }}
+              title="Custom color"
+              className="ov-picker-btn"
+              style={{
+                width: 30,
+                height: 30,
+                borderRadius: 6,
+                background: colorPickerPos !== null ? "rgba(255,255,255,0.12)" : "transparent",
+                border: colorPickerPos !== null ? "1px solid rgba(255,255,255,0.5)" : "1px solid transparent",
+                cursor: "pointer",
+                padding: 0,
+                flexShrink: 0,
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                gap: 3,
+              }}
+            >
+              <span style={{
+                width: 12,
+                height: 12,
+                borderRadius: 3,
+                background: strokeColor,
+                border: "1.5px solid rgba(255,255,255,0.4)",
+                display: "inline-block",
+                flexShrink: 0,
+              }} />
+              <svg width="11" height="11" viewBox="0 0 12 12" fill="none" stroke="#e5e7eb" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M8.5 1.5l2 2-6 6H2.5v-2l6-6z"/>
+              </svg>
+            </button>
 
             <div style={{ width: 1, height: 20, background: "rgba(255,255,255,0.1)", margin: "0 4px", flexShrink: 0 }} />
 
             {/* Stroke size */}
-            {([{ v: 2, label: "S" }, { v: 4, label: "M" }, { v: 6, label: "L" }] as const).map(({ v, label }) => (
+            {([{ v: 2, label: "S" }, { v: 4, label: "M" }, { v: 6, label: "L" }] as const).map(({ v, label }) => {
+              const isActive = strokeSize === v;
+              const isHov = hoveredSize === v && !isActive;
+              return (
               <button
                 key={v}
                 onClick={() => setStrokeSize(v)}
+                onMouseEnter={() => setHoveredSize(v)}
+                onMouseLeave={() => setHoveredSize(null)}
                 style={{
-                  background: strokeSize === v ? "rgba(255,255,255,0.15)" : "transparent",
-                  border: strokeSize === v ? "1px solid rgba(255,255,255,0.45)" : "1px solid transparent",
+                  background: isActive ? "rgba(255,255,255,0.15)" : isHov ? "rgba(255,255,255,0.07)" : "transparent",
+                  border: isActive ? "1px solid rgba(255,255,255,0.45)" : isHov ? "1px solid rgba(255,255,255,0.18)" : "1px solid transparent",
                   borderRadius: 5,
-                  color: strokeSize === v ? "#fff" : "#6b7280",
+                  color: isActive ? "#fff" : isHov ? "#d1d5db" : "#6b7280",
                   cursor: "pointer",
                   width: 22,
                   height: 22,
                   fontSize: 10,
                   fontWeight: "bold",
                   flexShrink: 0,
+                  transition: "background 0.1s, border-color 0.1s, color 0.1s",
                 }}
               >
                 {label}
               </button>
-            ))}
+              );
+            })}
           </div>
 
           {/* ── Divider ── */}
@@ -1611,6 +1533,7 @@ function CaptureOverlay() {
               }}
               disabled={annCount === 0}
               title="Undo (Ctrl+Z)"
+              className="ov-action-btn"
               style={{
                 background: "transparent",
                 border: "1px solid transparent",
@@ -1633,6 +1556,7 @@ function CaptureOverlay() {
             <button
               onClick={saveCapture}
               title="Save as PNG"
+              className="ov-action-btn"
               style={{
                 background: "transparent",
                 border: "1px solid rgba(255,255,255,0.1)",
@@ -1653,6 +1577,7 @@ function CaptureOverlay() {
             <button
               onClick={pinCapture}
               title="Pin on screen"
+              className="ov-action-btn"
               style={{
                 background: "transparent",
                 border: "1px solid rgba(255,255,255,0.1)",
@@ -1664,7 +1589,6 @@ function CaptureOverlay() {
                 display: "flex",
                 alignItems: "center",
                 justifyContent: "center",
-                fontSize: 13,
               }}
             >
               <Pin size={14} />
@@ -1676,6 +1600,7 @@ function CaptureOverlay() {
             <button
               onClick={exportCapture}
               title="Copy to clipboard (Ctrl+C)"
+              className="ov-capture-btn"
               style={{
                 background: "rgba(74,222,128,0.15)",
                 border: "1px solid rgba(74,222,128,0.6)",
@@ -1697,6 +1622,7 @@ function CaptureOverlay() {
             <button
               onClick={async () => { reset(); await closeOverlay(); }}
               title="Cancel (Esc)"
+              className="ov-esc-btn"
               style={{
                 background: "transparent",
                 border: "1px solid rgba(255,255,255,0.1)",
@@ -1784,7 +1710,10 @@ function CaptureOverlay() {
         const W = 160;
         const H = 148;
         const left = Math.min(colorPickerPos.x, window.innerWidth  - W - PAD);
-        const top  = colorPickerPos.y + PAD + H > window.innerHeight
+        const goAbove = colorPickerPos.above !== undefined
+          ? colorPickerPos.above
+          : colorPickerPos.y + PAD + H > window.innerHeight;
+        const top  = goAbove
           ? colorPickerPos.y - H - PAD
           : colorPickerPos.y + PAD;
         return (

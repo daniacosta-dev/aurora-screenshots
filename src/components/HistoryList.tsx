@@ -6,10 +6,18 @@ function HistoryList() {
   const { items, isLoading, error, captureScreenshot, clearHistory } =
     useHistoryStore();
 
-  if (isLoading) {
+  if (isLoading && items.length === 0) {
     return (
-      <div className="flex-1 flex items-center justify-center">
-        <p className="text-sm text-gray-500">Cargando...</p>
+      <div className="flex-1 flex flex-col overflow-hidden">
+        {[...Array(5)].map((_, i) => (
+          <div key={i} className="flex items-start gap-3 px-4 py-3 border-b border-gray-800/60">
+            <div className="w-16 h-12 rounded bg-gray-800/70 flex-shrink-0 animate-pulse" />
+            <div className="flex-1 flex flex-col gap-2 py-1">
+              <div className="h-2.5 rounded bg-gray-800/70 animate-pulse" style={{ width: `${60 + (i % 3) * 15}%` }} />
+              <div className="h-2 rounded bg-gray-800/50 animate-pulse w-16" />
+            </div>
+          </div>
+        ))}
       </div>
     );
   }

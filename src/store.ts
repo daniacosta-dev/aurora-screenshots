@@ -13,13 +13,15 @@ interface HistoryStore {
   clearHistory: () => Promise<void>;
 }
 
-export const useHistoryStore = create<HistoryStore>((set) => ({
+export const useHistoryStore = create<HistoryStore>((set, get) => ({
   items: [],
-  isLoading: false,
+  isLoading: true,
   error: null,
 
   fetchHistory: async () => {
-    set({ isLoading: true, error: null });
+    // Si ya tenemos items, refrescamos en background sin mostrar loading
+    const hasItems = get().items.length > 0;
+    if (!hasItems) set({ isLoading: true, error: null });
     try {
       const items = await invoke<HistoryItem[]>("get_history", { limit: 100 });
       set({ items, isLoading: false });

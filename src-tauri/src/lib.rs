@@ -66,6 +66,7 @@ pub fn run() {
             commands::finalize_annotated_capture,
             commands::hide_capture_overlay,
             commands::close_capture_overlay,
+            commands::show_main_window,
             commands::hide_main_window,
             commands::pin_screenshot,
             commands::get_pin_image,
@@ -144,9 +145,7 @@ fn register_shortcuts(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>
     Ok(())
 }
 
-fn show_history_window(app: &tauri::AppHandle) {
-    // Si la ventana ya existe (fue abierta y no cerrada aún), simplemente traerla al frente.
-    // Si no existe, crearla desde cero — no hay WebKitWebProcess en memoria hasta este momento.
+pub(crate) fn show_history_window(app: &tauri::AppHandle) {
     let window = match app.get_webview_window("main") {
         Some(w) => w,
         None => {
@@ -173,8 +172,6 @@ fn show_history_window(app: &tauri::AppHandle) {
     };
 
     position_main_window(&window);
-    // always_on_top(true) fuerza al WM a levantar la ventana por encima de todo,
-    // luego lo desactivamos para que se comporte como ventana normal.
     let _ = window.set_always_on_top(true);
     let _ = window.show();
     let _ = window.set_focus();

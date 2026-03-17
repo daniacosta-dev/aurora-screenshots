@@ -5,3 +5,41 @@
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
+
+/* ── Overlay toolbar hover effects ──────────────────────────────────── */
+.ov-action-btn {
+  transition: background 0.12s, border-color 0.12s, color 0.12s;
+}
+.ov-action-btn:hover:not(:disabled) {
+  background: rgba(255,255,255,0.08) !important;
+  border-color: rgba(255,255,255,0.18) !important;
+}
+.ov-capture-btn {
+  transition: background 0.12s, border-color 0.12s;
+}
+.ov-capture-btn:hover {
+  background: rgba(74,222,128,0.28) !important;
+  border-color: rgba(74,222,128,0.9) !important;
+}
+.ov-esc-btn {
+  transition: background 0.12s, border-color 0.12s, color 0.12s;
+}
+.ov-esc-btn:hover {
+  background: rgba(255,255,255,0.06) !important;
+  border-color: rgba(255,255,255,0.15) !important;
+  color: #9ca3af !important;
+}
+.ov-preset-btn {
+  transition: transform 0.1s, border-color 0.1s;
+}
+.ov-preset-btn:hover {
+  transform: scale(1.3);
+  border-color: rgba(255,255,255,0.7) !important;
+}
+.ov-picker-btn {
+  transition: background 0.12s, border-color 0.12s;
+}
+.ov-picker-btn:hover {
+  background: rgba(255,255,255,0.1) !important;
+  border-color: rgba(255,255,255,0.3) !important;
+}
