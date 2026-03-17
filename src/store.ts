@@ -3,6 +3,42 @@ import { create } from "zustand";
 
 import type { HistoryItem } from "./types";
 
+// ── Settings store ──────────────────────────────────────────────────────────
+
+interface SettingsStore {
+  captureShortcut: string;
+  isSaving: boolean;
+  error: string | null;
+  fetchShortcut: () => Promise<void>;
+  updateShortcut: (shortcut: string) => Promise<void>;
+}
+
+export const useSettingsStore = create<SettingsStore>((set) => ({
+  captureShortcut: "Ctrl+Shift+S",
+  isSaving: false,
+  error: null,
+
+  fetchShortcut: async () => {
+    set({ error: null });
+    try {
+      const s = await invoke<string>("get_capture_shortcut");
+      set({ captureShortcut: s });
+    } catch (err) {
+      set({ error: String(err) });
+    }
+  },
+
+  updateShortcut: async (shortcut: string) => {
+    set({ isSaving: true, error: null });
+    try {
+      await invoke("update_capture_shortcut", { shortcut });
+      set({ captureShortcut: shortcut, isSaving: false });
+    } catch (err) {
+      set({ error: String(err), isSaving: false });
+    }
+  },
+}));
+
 interface HistoryStore {
   items: HistoryItem[];
   isLoading: boolean;

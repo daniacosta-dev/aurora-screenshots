@@ -13,6 +13,8 @@ use tauri::{
 };
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 
+pub const DEFAULT_CAPTURE_SHORTCUT: &str = "Ctrl+Shift+S";
+
 pub struct AppState {
     pub db: Mutex<rusqlite::Connection>,
     /// Origen del virtual desktop (min_x, min_y de todos los monitores).
@@ -23,6 +25,8 @@ pub struct AppState {
     pub overlay_xid: Mutex<Option<u32>>,
     /// Imágenes de capturas pinadas pendientes de ser leídas por su ventana.
     pub pin_images: Mutex<std::collections::HashMap<String, String>>,
+    /// Shortcut activo para captura (ej. "Ctrl+Shift+S"). Fuente de verdad en memoria.
+    pub current_shortcut: Mutex<String>,
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -42,16 +46,23 @@ pub fn run() {
             db::init_db(&conn)
                 .map_err(|e| format!("No se pudo inicializar la base de datos: {e}"))?;
 
+            // Leer el shortcut guardado o usar el default.
+            let saved_shortcut = db::get_setting(&conn, "capture_shortcut")
+                .ok()
+                .flatten()
+                .unwrap_or_else(|| DEFAULT_CAPTURE_SHORTCUT.to_string());
+
             app.manage(AppState {
                 db: Mutex::new(conn),
                 overlay_offset: Mutex::new((0, 0)),
                 desktop_background: Mutex::new(None),
                 overlay_xid: Mutex::new(None),
                 pin_images: Mutex::new(std::collections::HashMap::new()),
+                current_shortcut: Mutex::new(saved_shortcut.clone()),
             });
 
             setup_tray(app)?;
-            register_shortcuts(app)?;
+            register_shortcut(app, &saved_shortcut)?;
 
             Ok(())
         })
@@ -68,6 +79,8 @@ pub fn run() {
             commands::close_capture_overlay,
             commands::show_main_window,
             commands::hide_main_window,
+            commands::get_capture_shortcut,
+            commands::update_capture_shortcut,
             commands::pin_screenshot,
             commands::get_pin_image,
             commands::copy_png_to_clipboard,
@@ -132,8 +145,65 @@ fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn register_shortcuts(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
-    let shortcut = Shortcut::new(Some(Modifiers::CONTROL | Modifiers::SHIFT), Code::KeyS);
+pub(crate) fn parse_shortcut(s: &str) -> Result<Shortcut, String> {
+    let parts: Vec<&str> = s.split('+').collect();
+    if parts.len() < 2 {
+        return Err("El shortcut debe tener al menos un modificador y una tecla".into());
+    }
+
+    let mut mods = Modifiers::empty();
+    let key_token = parts.last().unwrap();
+
+    for token in &parts[..parts.len() - 1] {
+        match *token {
+            "Ctrl"  => mods |= Modifiers::CONTROL,
+            "Shift" => mods |= Modifiers::SHIFT,
+            "Alt"   => mods |= Modifiers::ALT,
+            "Super" => mods |= Modifiers::SUPER,
+            other   => return Err(format!("Modificador desconocido: {other}")),
+        }
+    }
+
+    let code = match *key_token {
+        "A" => Code::KeyA, "B" => Code::KeyB, "C" => Code::KeyC, "D" => Code::KeyD,
+        "E" => Code::KeyE, "F" => Code::KeyF, "G" => Code::KeyG, "H" => Code::KeyH,
+        "I" => Code::KeyI, "J" => Code::KeyJ, "K" => Code::KeyK, "L" => Code::KeyL,
+        "M" => Code::KeyM, "N" => Code::KeyN, "O" => Code::KeyO, "P" => Code::KeyP,
+        "Q" => Code::KeyQ, "R" => Code::KeyR, "S" => Code::KeyS, "T" => Code::KeyT,
+        "U" => Code::KeyU, "V" => Code::KeyV, "W" => Code::KeyW, "X" => Code::KeyX,
+        "Y" => Code::KeyY, "Z" => Code::KeyZ,
+        "0" => Code::Digit0, "1" => Code::Digit1, "2" => Code::Digit2,
+        "3" => Code::Digit3, "4" => Code::Digit4, "5" => Code::Digit5,
+        "6" => Code::Digit6, "7" => Code::Digit7, "8" => Code::Digit8,
+        "9" => Code::Digit9,
+        "F1"  => Code::F1,  "F2"  => Code::F2,  "F3"  => Code::F3,  "F4"  => Code::F4,
+        "F5"  => Code::F5,  "F6"  => Code::F6,  "F7"  => Code::F7,  "F8"  => Code::F8,
+        "F9"  => Code::F9,  "F10" => Code::F10, "F11" => Code::F11, "F12" => Code::F12,
+        // Navegación
+        "Home" => Code::Home, "End" => Code::End,
+        "PageUp" => Code::PageUp, "PageDown" => Code::PageDown,
+        "Insert" => Code::Insert, "Delete" => Code::Delete,
+        // Flechas (nombre corto para mostrar en UI)
+        "Up" => Code::ArrowUp, "Down" => Code::ArrowDown,
+        "Left" => Code::ArrowLeft, "Right" => Code::ArrowRight,
+        // Otras
+        "Space" => Code::Space, "Tab" => Code::Tab,
+        "Enter" => Code::Enter, "Backspace" => Code::Backspace,
+        // Símbolos
+        "-" => Code::Minus,       "=" => Code::Equal,
+        "[" => Code::BracketLeft, "]" => Code::BracketRight,
+        "\\" => Code::Backslash,  ";" => Code::Semicolon,
+        "'" => Code::Quote,       "`" => Code::Backquote,
+        "," => Code::Comma,       "." => Code::Period,
+        "/" => Code::Slash,
+        other => return Err(format!("Tecla desconocida: {other}")),
+    };
+
+    Ok(Shortcut::new(Some(mods), code))
+}
+
+fn register_shortcut(app: &tauri::App, shortcut_str: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let shortcut = parse_shortcut(shortcut_str).map_err(|e| e)?;
 
     app.global_shortcut()
         .on_shortcut(shortcut, |app, _shortcut, event| {

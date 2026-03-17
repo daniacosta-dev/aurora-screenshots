@@ -1,10 +1,11 @@
-import { useHistoryStore } from "../store";
+import { useHistoryStore, useSettingsStore } from "../store";
 import HistoryItemCard from "./HistoryItem";
 import { Clipboard, Camera, Trash2 } from "lucide-react";
 
 function HistoryList() {
   const { items, isLoading, error, captureScreenshot, clearHistory } =
     useHistoryStore();
+  const { captureShortcut } = useSettingsStore();
 
   if (isLoading && items.length === 0) {
     return (
@@ -39,12 +40,14 @@ function HistoryList() {
         <p className="text-sm text-gray-400 text-center">
           El historial está vacío.
         </p>
-        <p className="text-xs text-gray-600 text-center">
+        <p className="text-xs text-gray-600 text-center flex items-center justify-center gap-1 flex-wrap">
           Usá{" "}
-          <kbd className="bg-gray-800 text-gray-400 px-1.5 py-0.5 rounded text-xs font-mono">
-            Ctrl+Shift+S
-          </kbd>{" "}
-          para capturar.
+          {captureShortcut.split("+").map((k) => (
+            <kbd key={k} className="bg-gray-800 text-gray-400 px-1.5 py-0.5 rounded text-xs font-mono">
+              {k}
+            </kbd>
+          ))}
+          {" "}para capturar.
         </p>
         <button
           onClick={captureScreenshot}

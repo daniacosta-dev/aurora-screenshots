@@ -1,12 +1,13 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useHistoryStore } from "./store";
 import HistoryList from "./components/HistoryList";
+import Settings from "./components/Settings";
 import CaptureOverlay from "./components/CaptureOverlay";
 import PinView from "./components/PinView";
-import { X } from "lucide-react";
+import { X, Settings as SettingsIcon } from "lucide-react";
 import "./App.css";
 
 const windowLabel = getCurrentWindow().label;
@@ -17,8 +18,11 @@ function App() {
   return <HistoryApp />;
 }
 
+type AppView = "history" | "settings";
+
 function HistoryApp() {
   const { fetchHistory } = useHistoryStore();
+  const [view, setView] = useState<AppView>("history");
 
   useEffect(() => {
     fetchHistory();
@@ -44,18 +48,28 @@ function HistoryApp() {
             Aurora Screenshots
           </h1>
         </div>
-        <div className="flex items-center gap-3">
-          <span className="text-xs text-gray-600">history</span>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => setView(view === "settings" ? "history" : "settings")}
+            className={`w-6 h-6 flex items-center justify-center rounded transition-colors ${
+              view === "settings"
+                ? "text-blue-400 bg-blue-400/10"
+                : "text-gray-600 hover:text-gray-300 hover:bg-gray-800"
+            }`}
+            title="Settings"
+          >
+            <SettingsIcon size={13} />
+          </button>
           <button
             onClick={() => invoke("hide_main_window")}
-            className="text-gray-600 hover:text-gray-300 transition-colors w-5 h-5 flex items-center justify-center rounded hover:bg-gray-800"
+            className="text-gray-600 hover:text-gray-300 transition-colors w-6 h-6 flex items-center justify-center rounded hover:bg-gray-800"
             title="Close"
           >
             <X size={13} />
           </button>
         </div>
       </header>
-      <HistoryList />
+      {view === "history" ? <HistoryList /> : <Settings />}
     </div>
   );
 }

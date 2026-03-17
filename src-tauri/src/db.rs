@@ -1,4 +1,4 @@
-use rusqlite::{Connection, Result, params};
+use rusqlite::{Connection, Result, params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -20,8 +20,28 @@ pub fn init_db(conn: &Connection) -> Result<()> {
             thumbnail   TEXT,
             created_at  DATETIME DEFAULT CURRENT_TIMESTAMP
         );
-        CREATE INDEX IF NOT EXISTS idx_history_created_at ON history(created_at DESC);",
+        CREATE INDEX IF NOT EXISTS idx_history_created_at ON history(created_at DESC);
+        CREATE TABLE IF NOT EXISTS settings (
+            key   TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );",
     )
+}
+
+pub fn get_setting(conn: &Connection, key: &str) -> Result<Option<String>> {
+    conn.query_row(
+        "SELECT value FROM settings WHERE key = ?1",
+        params![key],
+        |row| row.get(0),
+    ).optional()
+}
+
+pub fn set_setting(conn: &Connection, key: &str, value: &str) -> Result<()> {
+    conn.execute(
+        "INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)",
+        params![key, value],
+    )?;
+    Ok(())
 }
 
 pub fn insert_entry(

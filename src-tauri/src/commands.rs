@@ -1,6 +1,7 @@
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine as _;
 use tauri::{Emitter, Manager, State};
+use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 
 use crate::capture;
 use crate::clipboard;
@@ -378,6 +379,44 @@ pub fn close_capture_overlay(state: State<AppState>, app: tauri::AppHandle) -> R
         let _ = overlay.close();
     }
     Ok(())
+}
+
+/// Devuelve el shortcut activo para captura.
+#[tauri::command]
+pub fn get_capture_shortcut(state: State<AppState>) -> Result<String, String> {
+    state.current_shortcut.lock().map_err(|e| e.to_string()).map(|s| s.clone())
+}
+
+/// Registra un nuevo shortcut para captura, reemplazando el anterior. Persiste en DB.
+#[tauri::command]
+pub fn update_capture_shortcut(
+    state: State<AppState>,
+    app: tauri::AppHandle,
+    shortcut: String,
+) -> Result<(), String> {
+    let new_sc = crate::parse_shortcut(&shortcut)?;
+
+    // Desregistrar el shortcut actual.
+    let old_str = state.current_shortcut.lock().map_err(|e| e.to_string())?.clone();
+    if let Ok(old_sc) = crate::parse_shortcut(&old_str) {
+        let _ = app.global_shortcut().unregister(old_sc);
+    }
+
+    // Registrar el nuevo con el mismo handler.
+    app.global_shortcut()
+        .on_shortcut(new_sc, |app, _sc, event| {
+            if event.state() == ShortcutState::Pressed {
+                show_capture_overlay(app);
+            }
+        })
+        .map_err(|e| e.to_string())?;
+
+    // Actualizar estado en memoria.
+    *state.current_shortcut.lock().map_err(|e| e.to_string())? = shortcut.clone();
+
+    // Persistir en DB.
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    crate::db::set_setting(&db, "capture_shortcut", &shortcut).map_err(|e| e.to_string())
 }
 
 /// Muestra la ventana principal. Llamado por el frontend cuando React ya está montado,
