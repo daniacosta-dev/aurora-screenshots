@@ -55,15 +55,6 @@ pub fn run() {
 
             Ok(())
         })
-        .on_window_event(|window, event| {
-            // Ocultar ventana principal en lugar de cerrarla — la app vive en el tray
-            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                if window.label() == "main" {
-                    api.prevent_close();
-                    let _ = window.hide();
-                }
-            }
-        })
         .invoke_handler(tauri::generate_handler![
             commands::get_history,
             commands::delete_history_item,
@@ -81,8 +72,16 @@ pub fn run() {
             commands::copy_png_to_clipboard,
             commands::write_screenshot_file,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while running tauri application")
+        .run(|_app, event| {
+            // Sin esta guard, Tauri termina el proceso cuando se cierra la última ventana.
+            // La app vive en el tray: solo debe salir cuando el usuario elige "Quit".
+            // app.exit(0) (desde el menú) funciona igual — bypass prevent_exit.
+            if let tauri::RunEvent::ExitRequested { api, .. } = event {
+                api.prevent_exit();
+            }
+        });
 }
 
 /// SVG embebido en el binario — no depende de ningún archivo externo en runtime.
@@ -146,15 +145,40 @@ fn register_shortcuts(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>
 }
 
 fn show_history_window(app: &tauri::AppHandle) {
-    if let Some(window) = app.get_webview_window("main") {
-        position_main_window(&window);
-        // always_on_top(true) fuerza al WM a levantar la ventana por encima de todo,
-        // luego lo desactivamos para que se comporte como ventana normal.
-        let _ = window.set_always_on_top(true);
-        let _ = window.show();
-        let _ = window.set_focus();
-        let _ = window.set_always_on_top(false);
-    }
+    // Si la ventana ya existe (fue abierta y no cerrada aún), simplemente traerla al frente.
+    // Si no existe, crearla desde cero — no hay WebKitWebProcess en memoria hasta este momento.
+    let window = match app.get_webview_window("main") {
+        Some(w) => w,
+        None => {
+            match tauri::WebviewWindowBuilder::new(
+                app,
+                "main",
+                tauri::WebviewUrl::App("index.html".into()),
+            )
+            .title("Aurora Screenshots")
+            .inner_size(420.0, 650.0)
+            .visible(false)
+            .skip_taskbar(true)
+            .resizable(false)
+            .decorations(false)
+            .build()
+            {
+                Ok(w) => w,
+                Err(e) => {
+                    eprintln!("[show_history] failed to create window: {e}");
+                    return;
+                }
+            }
+        }
+    };
+
+    position_main_window(&window);
+    // always_on_top(true) fuerza al WM a levantar la ventana por encima de todo,
+    // luego lo desactivamos para que se comporte como ventana normal.
+    let _ = window.set_always_on_top(true);
+    let _ = window.show();
+    let _ = window.set_focus();
+    let _ = window.set_always_on_top(false);
 }
 
 /// Posiciona la ventana principal en la esquina superior derecha del monitor primario.

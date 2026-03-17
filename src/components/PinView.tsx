@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { Copy, Check, X } from "lucide-react";
 
 const win = getCurrentWindow();
 const pinId = win.label.slice("pin-".length);
@@ -86,16 +87,10 @@ export default function PinView() {
         }}
       >
         <Btn onClick={handleCopy} title="Copy to clipboard">
-          {copied ? "✓" : (
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
-            </svg>
-          )}
+          {copied ? <Check size={13} /> : <Copy size={13} />}
         </Btn>
         <Btn onClick={() => win.close()} title="Close (Esc)">
-          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
-            <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
-          </svg>
+          <X size={12} />
         </Btn>
       </div>
     </div>

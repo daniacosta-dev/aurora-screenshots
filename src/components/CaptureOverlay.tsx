@@ -4,6 +4,10 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
 import { save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { pictureDir, downloadDir } from "@tauri-apps/api/path";
+import {
+  ArrowUpRight, Square, Circle as CircleIcon, Pencil, Highlighter,
+  Type, Blend, Contrast, MessageCircle, Ruler, Undo2, Save, Pin,
+} from "lucide-react";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -583,6 +587,8 @@ function CaptureOverlay() {
   const startPos = useRef<Pt>({ x: 0, y: 0 });
   const endPos = useRef<Pt>({ x: 0, y: 0 });
   const bgImageRef = useRef<HTMLImageElement | null>(null);
+  // Copia del base64 original del escritorio; permite exportFullDesktop sin volver a pedir a Rust.
+  const bgDataRef = useRef<string | null>(null);
   const annotationsRef = useRef<Annotation[]>([]);
   const currentAnnRef = useRef<Annotation | null>(null);
   const isDraggingAnn = useRef(false);
@@ -720,6 +726,7 @@ function CaptureOverlay() {
     try {
       const bg = await invoke<string | null>("get_desktop_background");
       if (bg) {
+        bgDataRef.current = bg;
         const img = new Image();
         img.onload = () => {
           bgImageRef.current = img;
@@ -743,6 +750,7 @@ function CaptureOverlay() {
     resizingHandleRef.current = null;
     if (resizeCleanupRef.current) { resizeCleanupRef.current(); }
     bgImageRef.current = null;
+    bgDataRef.current = null;
     if (canvasRef.current) canvasRef.current.style.cursor = "crosshair";
     setDisplayPhase("idle");
     setActiveTool(null);
@@ -816,17 +824,10 @@ function CaptureOverlay() {
     }
     ctx.restore();
 
-    // Export to base64
-    const blob = await new Promise<Blob | null>((resolve) =>
-      offscreen.toBlob(resolve, "image/png")
-    );
-    if (!blob) return;
-
-    const ab = await blob.arrayBuffer();
-    const bytes = new Uint8Array(ab);
-    let binary = "";
-    for (let i = 0; i < bytes.byteLength; i++) binary += String.fromCharCode(bytes[i]);
-    const base64 = btoa(binary);
+    // Export to base64 — toDataURL evita la cadena Blob→ArrayBuffer→Uint8Array→btoa
+    const dataUrl = offscreen.toDataURL("image/png");
+    offscreen.width = 0; // libera el buffer del canvas inmediatamente
+    const base64 = dataUrl.slice("data:image/png;base64,".length);
 
     reset();
     await new Promise<void>((r) => requestAnimationFrame(() => r()));
@@ -842,7 +843,8 @@ function CaptureOverlay() {
   // Ctrl+C sin selección: copiar el escritorio completo
   const exportFullDesktop = useCallback(async () => {
     try {
-      const bg = await invoke<string | null>("get_desktop_background");
+      // Usar el base64 ya cargado en memoria; no volver a pedirlo a Rust.
+      const bg = bgDataRef.current;
       if (!bg) return;
       await invoke("finalize_annotated_capture", { imageData: bg });
       reset();
@@ -880,25 +882,21 @@ function CaptureOverlay() {
     for (const ann of annotationsRef.current) drawAnnotation(ctx, ann, dpr);
     ctx.restore();
 
-    const blob = await new Promise<Blob | null>((resolve) => offscreen.toBlob(resolve, "image/png"));
-    if (!blob) return;
-    const ab = await blob.arrayBuffer();
-    const bytes = new Uint8Array(ab);
-    let binary = "";
-    for (let i = 0; i < bytes.byteLength; i++) binary += String.fromCharCode(bytes[i]);
-    const base64 = btoa(binary);
+    const dataUrl = offscreen.toDataURL("image/png");
+    offscreen.width = 0; // libera el buffer del canvas inmediatamente
+    const base64 = dataUrl.slice("data:image/png;base64,".length);
 
     reset();
     await new Promise<void>((r) => requestAnimationFrame(() => r()));
 
     try {
       await invoke("pin_screenshot", { imageData: base64, width: Math.round(sw), height: Math.round(sh) });
-      await hideOverlay();
+      await closeOverlay();
     } catch (err) {
       console.error("Error al pinear captura:", err);
-      await hideOverlay();
+      await closeOverlay();
     }
-  }, [reset, hideOverlay]);
+  }, [reset, closeOverlay]);
 
   // ── Save to file ──────────────────────────────────────────────────────
   const saveCapture = useCallback(async () => {
@@ -927,13 +925,9 @@ function CaptureOverlay() {
     for (const ann of annotationsRef.current) drawAnnotation(ctx, ann, dpr);
     ctx.restore();
 
-    const blob = await new Promise<Blob | null>((resolve) => offscreen.toBlob(resolve, "image/png"));
-    if (!blob) return;
-    const ab = await blob.arrayBuffer();
-    const bytes = new Uint8Array(ab);
-    let binary = "";
-    for (let i = 0; i < bytes.byteLength; i++) binary += String.fromCharCode(bytes[i]);
-    const base64 = btoa(binary);
+    const dataUrl = offscreen.toDataURL("image/png");
+    offscreen.width = 0; // libera el buffer del canvas inmediatamente
+    const base64 = dataUrl.slice("data:image/png;base64,".length);
 
     // Ocultar overlay ANTES del diálogo para que aparezca encima (override_redirect cubre todo)
     reset();
@@ -1435,51 +1429,16 @@ function CaptureOverlay() {
 
   // ── Render ────────────────────────────────────────────────────────────
   const toolDefs: { tool: Tool; icon: React.ReactNode; title: string; key: string }[] = [
-    { tool: "arrow",     icon: "→",  title: "Arrow [A]",                   key: "A" },
-    { tool: "rect",      icon: "□",  title: "Rectangle [S] (Ctrl=square)", key: "S" },
-    { tool: "circle",    icon: "○",  title: "Circle [C] (Ctrl=perfect)",   key: "C" },
-    { tool: "marker",    icon: "~",  title: "Marker [P]",                  key: "P" },
-    {
-      tool: "highlight",
-      title: "Highlighter [H]",
-      key: "H",
-      icon: (
-        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" strokeLinecap="round" strokeLinejoin="round">
-          <rect x="1.5" y="9" width="13" height="4.5" rx="2" fill="currentColor" fillOpacity="0.35" stroke="none"/>
-          <line x1="4" y1="8.5" x2="12" y2="3.5" stroke="currentColor" strokeWidth="1.4"/>
-          <line x1="12" y1="3.5" x2="14" y2="5.5" stroke="currentColor" strokeWidth="1.4"/>
-          <line x1="4" y1="8.5" x2="6" y2="10.5" stroke="currentColor" strokeWidth="1.4"/>
-        </svg>
-      ),
-    },
-    { tool: "text",  icon: "T",  title: "Text [T]",  key: "T" },
-    { tool: "blur",  icon: "◌",  title: "Blur [B]",  key: "B" },
-    {
-      tool: "invert",
-      title: "Invert colors [I]",
-      key: "I",
-      icon: (
-        <svg width="16" height="16" viewBox="0 0 16 16">
-          <circle cx="8" cy="8" r="5.5" fill="currentColor" stroke="currentColor" strokeWidth="1.2"/>
-          <path d="M8 2.5a5.5 5.5 0 0 0 0 11Z" fill="white" stroke="none"/>
-        </svg>
-      ),
-    },
-    { tool: "bubble", icon: "①", title: "Numbered bubble [N]", key: "N" },
-    {
-      tool: "ruler",
-      title: "Ruler [L] (measure px)",
-      key: "L",
-      icon: (
-        <svg width="17" height="17" viewBox="0 0 17 17" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round">
-          <rect x="1" y="5.5" width="15" height="6" rx="1.2" strokeWidth="1.3" fill="none"/>
-          <line x1="4"  y1="5.5" x2="4"  y2="8"/>
-          <line x1="7"  y1="5.5" x2="7"  y2="9.5"/>
-          <line x1="10" y1="5.5" x2="10" y2="8"/>
-          <line x1="13" y1="5.5" x2="13" y2="9.5"/>
-        </svg>
-      ),
-    },
+    { tool: "arrow",     icon: <ArrowUpRight size={15} />,   title: "Arrow [A]",                   key: "A" },
+    { tool: "rect",      icon: <Square size={14} />,         title: "Rectangle [S] (Ctrl=square)", key: "S" },
+    { tool: "circle",    icon: <CircleIcon size={14} />,     title: "Circle [C] (Ctrl=perfect)",   key: "C" },
+    { tool: "marker",    icon: <Pencil size={14} />,         title: "Marker [P]",                  key: "P" },
+    { tool: "highlight", icon: <Highlighter size={14} />,    title: "Highlighter [H]",             key: "H" },
+    { tool: "text",      icon: <Type size={14} />,           title: "Text [T]",                    key: "T" },
+    { tool: "blur",      icon: <Blend size={14} />,          title: "Blur [B]",                    key: "B" },
+    { tool: "invert",    icon: <Contrast size={14} />,       title: "Invert colors [I]",           key: "I" },
+    { tool: "bubble",    icon: <MessageCircle size={14} />,  title: "Numbered bubble [N]",         key: "N" },
+    { tool: "ruler",     icon: <Ruler size={14} />,          title: "Ruler [L] (measure px)",      key: "L" },
   ];
 
   return (
@@ -1665,10 +1624,7 @@ function CaptureOverlay() {
                 justifyContent: "center",
               }}
             >
-              <svg width="14" height="14" viewBox="0 0 15 15" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M4.5 8.5a4 4 0 1 0 .8-2.8"/>
-                <polyline points="2,5 4.5,5 4.5,7.5"/>
-              </svg>
+              <Undo2 size={14} />
             </button>
 
             <div style={{ width: 1, height: 18, background: "rgba(255,255,255,0.08)", margin: "0 4px", flexShrink: 0 }} />
@@ -1690,12 +1646,7 @@ function CaptureOverlay() {
                 justifyContent: "center",
               }}
             >
-              <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round">
-                <rect x="2" y="2" width="12" height="12" rx="1.5"/>
-                <rect x="4.5" y="8.5" width="7" height="4" rx="0.8"/>
-                <rect x="5" y="2" width="5" height="3.5" rx="0.5"/>
-                <line x1="8.5" y1="2.5" x2="8.5" y2="5"/>
-              </svg>
+              <Save size={14} />
             </button>
 
             {/* Pin */}
@@ -1716,7 +1667,7 @@ function CaptureOverlay() {
                 fontSize: 13,
               }}
             >
-              📌
+              <Pin size={14} />
             </button>
 
             <div style={{ width: 1, height: 18, background: "rgba(255,255,255,0.08)", margin: "0 4px", flexShrink: 0 }} />

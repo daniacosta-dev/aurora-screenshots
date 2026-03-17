@@ -2,6 +2,7 @@ import { useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useHistoryStore } from "../store";
 import type { HistoryItem } from "../types";
+import { Copy, Check, Trash2 } from "lucide-react";
 
 interface Props {
   item: HistoryItem;
@@ -55,22 +56,23 @@ function HistoryItemCard({ item }: Props) {
       <div className="flex items-center gap-1 flex-shrink-0">
         <button
           onClick={handleCopy}
-          className={`text-xs px-2 py-1 rounded transition-all ${
+          className={`flex items-center gap-1 text-xs px-2 py-1 rounded transition-all ${
             copied
               ? "text-green-400 bg-green-400/10"
               : "text-gray-400 hover:text-blue-400 hover:bg-blue-400/10"
           }`}
           title={item.type === "image" ? "Copiar imagen" : "Copiar texto"}
         >
-          {copied ? "✓ Copiado" : "Copiar"}
+          {copied ? <Check size={12} /> : <Copy size={12} />}
+          {copied ? "Copiado" : "Copiar"}
         </button>
 
         <button
           onClick={() => deleteItem(item.id)}
-          className="opacity-0 group-hover:opacity-100 text-gray-600 hover:text-red-400 transition-all text-base leading-none px-1 py-0.5 rounded"
+          className="opacity-0 group-hover:opacity-100 text-gray-600 hover:text-red-400 transition-all p-1 rounded"
           aria-label="Eliminar"
         >
-          ×
+          <Trash2 size={13} />
         </button>
       </div>
     </div>

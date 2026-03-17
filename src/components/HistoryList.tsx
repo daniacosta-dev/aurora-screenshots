@@ -1,5 +1,6 @@
 import { useHistoryStore } from "../store";
 import HistoryItemCard from "./HistoryItem";
+import { Clipboard, Camera, Trash2 } from "lucide-react";
 
 function HistoryList() {
   const { items, isLoading, error, captureScreenshot, clearHistory } =
@@ -24,8 +25,8 @@ function HistoryList() {
   if (items.length === 0) {
     return (
       <div className="flex-1 flex flex-col items-center justify-center gap-3 px-6">
-        <div className="w-12 h-12 rounded-xl bg-gray-800 flex items-center justify-center">
-          <span className="text-2xl">📋</span>
+        <div className="w-12 h-12 rounded-xl bg-gray-800 flex items-center justify-center text-gray-500">
+          <Clipboard size={22} />
         </div>
         <p className="text-sm text-gray-400 text-center">
           El historial está vacío.
@@ -39,8 +40,9 @@ function HistoryList() {
         </p>
         <button
           onClick={captureScreenshot}
-          className="mt-2 px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white text-sm rounded-lg transition-colors"
+          className="mt-2 flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white text-sm rounded-lg transition-colors"
         >
+          <Camera size={14} />
           Capturar ahora
         </button>
       </div>
@@ -57,14 +59,16 @@ function HistoryList() {
         <div className="flex items-center gap-3">
           <button
             onClick={captureScreenshot}
-            className="text-xs text-gray-400 hover:text-blue-400 transition-colors"
+            className="flex items-center gap-1 text-xs text-gray-400 hover:text-blue-400 transition-colors"
           >
+            <Camera size={12} />
             Capturar
           </button>
           <button
             onClick={clearHistory}
-            className="text-xs text-gray-500 hover:text-red-400 transition-colors"
+            className="flex items-center gap-1 text-xs text-gray-500 hover:text-red-400 transition-colors"
           >
+            <Trash2 size={12} />
             Limpiar todo
           </button>
         </div>

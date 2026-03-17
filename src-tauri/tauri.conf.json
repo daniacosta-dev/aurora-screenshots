@@ -10,36 +10,6 @@
     "frontendDist": "../dist"
   },
   "app": {
-    "windows": [
-      {
-        "label": "capture-overlay",
-        "title": "Aurora Screenshots",
-        "fullscreen": false,
-        "width": 1920,
-        "height": 1080,
-        "x": 0,
-        "y": 0,
-        "transparent": true,
-        "decorations": false,
-        "alwaysOnTop": true,
-        "skipTaskbar": true,
-        "visible": false,
-        "resizable": false,
-        "shadow": false
-      },
-      {
-        "label": "main",
-        "title": "Aurora Screenshots",
-        "width": 420,
-        "height": 650,
-        "visible": false,
-        "skipTaskbar": true,
-        "resizable": false,
-        "decorations": false,
-        "x": 0,
-        "y": 0
-      }
-    ],
     "security": {
       "csp": null
     }
