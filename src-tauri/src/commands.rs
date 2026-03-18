@@ -442,6 +442,43 @@ pub fn update_capture_shortcut(
     crate::db::set_setting(&db, "capture_shortcut", &shortcut).map_err(|e| e.to_string())
 }
 
+// ─── Autoarranque ─────────────────────────────────────────────────────────
+
+fn autostart_desktop_path() -> Result<std::path::PathBuf, String> {
+    let home = std::env::var("HOME").map_err(|_| "No se encontró $HOME".to_string())?;
+    Ok(std::path::PathBuf::from(home)
+        .join(".config")
+        .join("autostart")
+        .join("aurora-screenshots.desktop"))
+}
+
+/// Verifica si el autoarranque al inicio del sistema está habilitado.
+#[tauri::command]
+pub fn get_autostart() -> Result<bool, String> {
+    let path = autostart_desktop_path()?;
+    Ok(path.exists())
+}
+
+/// Habilita o deshabilita el autoarranque al inicio del sistema.
+#[tauri::command]
+pub fn set_autostart(enabled: bool) -> Result<(), String> {
+    let path = autostart_desktop_path()?;
+    if enabled {
+        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+        let desktop = format!(
+            "[Desktop Entry]\nType=Application\nName=Aurora Screenshots\nExec={}\nHidden=false\nNoDisplay=false\nX-GNOME-Autostart-enabled=true\n",
+            exe.display()
+        );
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        std::fs::write(&path, desktop).map_err(|e| e.to_string())?;
+    } else if path.exists() {
+        std::fs::remove_file(&path).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 /// Muestra la ventana principal. Llamado por el frontend cuando React ya está montado,
 /// para evitar el flash de pantalla blanca al abrir el historial por primera vez.
 #[tauri::command]

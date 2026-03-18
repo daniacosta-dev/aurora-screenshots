@@ -12,7 +12,7 @@ function HistoryItemCard({ item }: Props) {
   const { deleteItem } = useHistoryStore();
   const [copied, setCopied] = useState(false);
 
-  const formattedDate = new Date(item.created_at).toLocaleString("es-AR", {
+  const formattedDate = new Date(item.created_at).toLocaleString("en-US", {
     day: "2-digit",
     month: "2-digit",
     hour: "2-digit",
@@ -47,7 +47,7 @@ function HistoryItemCard({ item }: Props) {
       {/* Contenido */}
       <div className="flex-1 min-w-0">
         <p className="text-xs text-gray-300 truncate leading-relaxed">
-          {item.type === "text" ? item.content : "Captura de pantalla"}
+          {item.type === "text" ? item.content : "Screenshot"}
         </p>
         <p className="text-xs text-gray-600 mt-1">{formattedDate}</p>
       </div>
@@ -61,16 +61,16 @@ function HistoryItemCard({ item }: Props) {
               ? "text-green-400 bg-green-400/10"
               : "text-gray-400 hover:text-blue-400 hover:bg-blue-400/10"
           }`}
-          title={item.type === "image" ? "Copiar imagen" : "Copiar texto"}
+          title={item.type === "image" ? "Copy image" : "Copy text"}
         >
           {copied ? <Check size={12} /> : <Copy size={12} />}
-          {copied ? "Copiado" : "Copiar"}
+          {copied ? "Copied" : "Copy"}
         </button>
 
         <button
           onClick={() => deleteItem(item.id)}
           className="opacity-0 group-hover:opacity-100 text-gray-600 hover:text-red-400 transition-all p-1 rounded"
-          aria-label="Eliminar"
+          aria-label="Delete"
         >
           <Trash2 size={13} />
         </button>

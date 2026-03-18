@@ -9,14 +9,18 @@ interface SettingsStore {
   captureShortcut: string;
   isSaving: boolean;
   error: string | null;
+  autostart: boolean;
   fetchShortcut: () => Promise<void>;
   updateShortcut: (shortcut: string) => Promise<void>;
+  fetchAutostart: () => Promise<void>;
+  updateAutostart: (enabled: boolean) => Promise<void>;
 }
 
 export const useSettingsStore = create<SettingsStore>((set) => ({
   captureShortcut: "Ctrl+Shift+S",
   isSaving: false,
   error: null,
+  autostart: false,
 
   fetchShortcut: async () => {
     set({ error: null });
@@ -35,6 +39,24 @@ export const useSettingsStore = create<SettingsStore>((set) => ({
       set({ captureShortcut: shortcut, isSaving: false });
     } catch (err) {
       set({ error: String(err), isSaving: false });
+    }
+  },
+
+  fetchAutostart: async () => {
+    try {
+      const enabled = await invoke<boolean>("get_autostart");
+      set({ autostart: enabled });
+    } catch (err) {
+      set({ error: String(err) });
+    }
+  },
+
+  updateAutostart: async (enabled: boolean) => {
+    try {
+      await invoke("set_autostart", { enabled });
+      set({ autostart: enabled });
+    } catch (err) {
+      set({ error: String(err) });
     }
   },
 }));

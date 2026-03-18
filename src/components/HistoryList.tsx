@@ -39,23 +39,23 @@ function HistoryList() {
           <Clipboard size={22} />
         </div>
         <p className="text-sm text-gray-400 text-center">
-          El historial está vacío.
+          History is empty.
         </p>
         <p className="text-xs text-gray-600 text-center flex items-center justify-center gap-1 flex-wrap">
-          Usá{" "}
+          Press{" "}
           {captureShortcut.split("+").map((k) => (
             <kbd key={k} className="bg-gray-800 text-gray-400 px-1.5 py-0.5 rounded text-xs font-mono">
               {k}
             </kbd>
           ))}
-          {" "}para capturar.
+          {" "}to capture.
         </p>
         <button
           onClick={captureScreenshot}
           className="mt-2 flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white text-sm rounded-lg transition-colors"
         >
           <Camera size={14} />
-          Capturar ahora
+          Capture now
         </button>
       </div>
     );
@@ -74,22 +74,22 @@ function HistoryList() {
             className="flex items-center gap-1 text-xs text-gray-400 hover:text-blue-400 transition-colors"
           >
             <Camera size={12} />
-            Capturar
+            Capture
           </button>
           <button
             onClick={() => invoke("open_screenshots_folder")}
             className="flex items-center gap-1 text-xs text-gray-400 hover:text-blue-400 transition-colors"
-            title="Abrir carpeta de capturas"
+            title="Open screenshots folder"
           >
             <FolderOpen size={12} />
-            Abrir carpeta
+            Open folder
           </button>
           <button
             onClick={clearHistory}
             className="flex items-center gap-1 text-xs text-gray-500 hover:text-red-400 transition-colors"
           >
             <Trash2 size={12} />
-            Limpiar todo
+            Clear all
           </button>
         </div>
       </div>

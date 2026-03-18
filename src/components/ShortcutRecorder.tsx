@@ -63,7 +63,7 @@ export default function ShortcutRecorder({ value, onSave, isSaving, error }: Pro
     const key = NORMALIZE_KEY[e.key] ?? raw;
 
     if (!VALID_KEYS.has(key)) {
-      setKeyError(`Tecla "${key}" no soportada. Usá letras, números o F1-F12.`);
+      setKeyError(`Key "${key}" not supported. Use letters, numbers or F1-F12.`);
       return;
     }
 
@@ -98,7 +98,7 @@ export default function ShortcutRecorder({ value, onSave, isSaving, error }: Pro
               {k}
             </kbd>
           ))}
-          {pending && <span className="text-xs text-amber-400 ml-1">sin guardar</span>}
+          {pending && <span className="text-xs text-amber-400 ml-1">unsaved</span>}
         </div>
 
         {/* Botones */}
@@ -109,7 +109,7 @@ export default function ShortcutRecorder({ value, onSave, isSaving, error }: Pro
             className="flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded bg-gray-800 hover:bg-gray-700 text-gray-300 hover:text-white border border-gray-700 transition-colors disabled:opacity-40"
           >
             <Keyboard size={11} />
-            Cambiar
+            Change
           </button>
         )}
         {pending && (
@@ -119,13 +119,13 @@ export default function ShortcutRecorder({ value, onSave, isSaving, error }: Pro
               disabled={isSaving}
               className="text-xs px-2.5 py-1.5 rounded bg-blue-600 hover:bg-blue-500 text-white border border-blue-500 transition-colors disabled:opacity-40"
             >
-              {isSaving ? "Guardando…" : "Guardar"}
+              {isSaving ? "Saving…" : "Save"}
             </button>
             <button
               onClick={handleCancel}
               className="text-xs px-2.5 py-1.5 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 border border-gray-700 transition-colors"
             >
-              Cancelar
+              Cancel
             </button>
           </>
         )}
@@ -142,7 +142,7 @@ export default function ShortcutRecorder({ value, onSave, isSaving, error }: Pro
         >
           <div className="flex items-center gap-2 text-xs text-blue-300">
             <span className="animate-pulse text-blue-400">●</span>
-            Presioná la combinación de teclas… (Esc para cancelar)
+            Press the key combination… (Esc to cancel)
           </div>
           {keyError && <p className="text-xs text-amber-400">{keyError}</p>}
         </div>
