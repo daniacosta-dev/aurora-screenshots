@@ -450,6 +450,8 @@ function CaptureOverlay() {
   const bgImageRef = useRef<HTMLImageElement | null>(null);
   // Copia del base64 original del escritorio; permite exportFullDesktop sin volver a pedir a Rust.
   const bgDataRef = useRef<string | null>(null);
+  // Evita llamar overlay_ready más de una vez por ciclo de captura.
+  const overlayReadySent = useRef(false);
   const annotationsRef = useRef<Annotation[]>([]);
   const currentAnnRef = useRef<Annotation | null>(null);
   const isDraggingAnn = useRef(false);
@@ -523,18 +525,18 @@ function CaptureOverlay() {
     const { sx, sy, sw, sh } = getSelRect(startPos.current, endPos.current);
 
     if (p === "drawing") {
-      // Dark vignette over full canvas
+      // Overlay oscuro solo FUERA de la selección usando clip evenodd.
+      // El fondo (ya dibujado arriba) queda visible en la zona seleccionada
+      // sin necesidad de clearRect — evita el negro cuando bg carga lento.
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(0, 0, W, H);
+      // Solo abrir el "agujero" si el fondo ya cargó; si no, la selección quedaría negra.
+      if (bg && sw > 0 && sh > 0) ctx.rect(sx, sy, sw, sh);
+      ctx.clip("evenodd");
       ctx.fillStyle = "rgba(0,0,0,0.5)";
       ctx.fillRect(0, 0, W, H);
-      // Reveal selection area
-      if (sw > 0 && sh > 0) {
-        ctx.clearRect(sx, sy, sw, sh);
-        if (bg) {
-          const scaleX = bg.naturalWidth / W;
-          const scaleY = bg.naturalHeight / H;
-          ctx.drawImage(bg, sx * scaleX, sy * scaleY, sw * scaleX, sh * scaleY, sx, sy, sw, sh);
-        }
-      }
+      ctx.restore();
       // Selection border
       ctx.save();
       ctx.strokeStyle = "rgba(255,255,255,0.9)";
@@ -584,27 +586,79 @@ function CaptureOverlay() {
     }
   }, []);
 
+  // ── Signal Rust that the canvas is ready → hace show() del overlay ────
+  const signalReady = useCallback(async () => {
+    if (overlayReadySent.current) return;
+    overlayReadySent.current = true;
+    try {
+      await invoke("overlay_ready");
+    } catch (e) {
+      console.warn("[overlay] overlay_ready invoke failed:", e);
+    }
+  }, []);
+
   // ── Load background screenshot ─────────────────────────────────────────
   const loadBackground = useCallback(async () => {
     try {
-      const bg = await invoke<string | null>("get_desktop_background");
-      if (bg) {
-        bgDataRef.current = bg;
+      const t0 = performance.now();
+      type MonitorCapture = { x: number; y: number; width: number; height: number; data: string };
+      const monitors = await invoke<MonitorCapture[] | null>("get_desktop_background");
+      console.log(`[timing] IPC: ${(performance.now() - t0).toFixed(1)}ms  monitors=${monitors?.length}`);
+
+      if (!monitors || monitors.length === 0) return;
+
+      const totalW = Math.max(...monitors.map(m => m.x + m.width));
+      const totalH = Math.max(...monitors.map(m => m.y + m.height));
+
+      // HTMLCanvasElement — compatible con WebKitGTK (OffscreenCanvas.convertToBlob no está disponible)
+      const canvas = document.createElement("canvas");
+      canvas.width = totalW;
+      canvas.height = totalH;
+      const ctx = canvas.getContext("2d")!;
+
+      const t1 = performance.now();
+      await Promise.all(monitors.map(m => new Promise<void>((resolve, reject) => {
         const img = new Image();
-        img.onload = () => {
-          bgImageRef.current = img;
+        img.onload = () => { ctx.drawImage(img, m.x, m.y); resolve(); };
+        img.onerror = reject;
+        img.src = `data:image/jpeg;base64,${m.data}`;
+      })));
+      console.log(`[timing] decode + composite: ${(performance.now() - t1).toFixed(1)}ms`);
+
+      const dataUrl = canvas.toDataURL("image/jpeg", 0.97);
+
+      // Awaitar la carga de la imagen final para poder llamar signalReady en el mismo tick.
+      await new Promise<void>((resolve) => {
+        const finalImg = new Image();
+        finalImg.onload = () => {
+          console.log(`[timing] background total: ${(performance.now() - t0).toFixed(1)}ms`);
+          bgImageRef.current = finalImg;
+          bgDataRef.current = dataUrl.slice("data:image/jpeg;base64,".length);
           draw();
+          resolve();
         };
-        img.src = `data:image/png;base64,${bg}`;
-      }
+        finalImg.onerror = () => resolve();
+        finalImg.src = dataUrl;
+      });
+
+      // Canvas listo → decirle a Rust que haga show() del overlay.
+      await signalReady();
+
+      // show() en GTK es asíncrono: la ventana se mapea unos ms después.
+      // Dar tiempo para que GTK la mapee y window.innerWidth/innerHeight sean correctos,
+      // luego reinicializar el canvas con las dimensiones reales y redibujar.
+      await new Promise<void>((r) => setTimeout(r, 30));
+      initCanvas();
+      if (bgImageRef.current) draw();
     } catch (e) {
       console.warn("Background not available:", e);
     }
-  }, [draw]);
+  }, [draw, initCanvas, signalReady]);
 
   // ── Reset ─────────────────────────────────────────────────────────────
   const reset = useCallback(() => {
     phase.current = "idle";
+    overlayReadySent.current = false;
     startPos.current = { x: 0, y: 0 };
     endPos.current = { x: 0, y: 0 };
     annotationsRef.current = [];
@@ -824,10 +878,17 @@ function CaptureOverlay() {
     // pero background-ready y onFocus se perdieron porque React aún no había montado.
     loadBackground();
 
+    // Fallback: si la carga del fondo falla o demora demasiado, mostrar el overlay
+    // de todas formas después de 800ms para no dejar la ventana oculta para siempre.
+    const safetyTimer = setTimeout(() => signalReady(), 800);
+
     const onFocus = () => {
       console.log("[overlay] window focus — phase:", phase.current, "hasFocus:", document.hasFocus());
       if (phase.current !== "idle") return;
-      reset();
+      // No llamar reset() aquí: en el nuevo flujo, background-ready ya llamó reset()
+      // antes de loadBackground() y signalReady(). Si llamamos reset() aquí (después de
+      // que show() disparó el focus), borraríamos el fondo recién pintado.
+      // Solo intentamos cargar si hay datos nuevos en AppState (take() devuelve null si no).
       loadBackground();
     };
     const onBlur = () => {
@@ -840,8 +901,8 @@ function CaptureOverlay() {
     // reset() primero para limpiar anotaciones/estado de la captura anterior.
     let unlistenBg: (() => void) | null = null;
     listen("background-ready", () => {
-      console.log("[overlay] background-ready received");
-      reset();
+      console.log("[overlay] background-ready received, phase:", phase.current);
+      if (phase.current === "idle") reset();
       loadBackground();
     }).then((fn) => { unlistenBg = fn; });
 
@@ -906,13 +967,14 @@ function CaptureOverlay() {
 
     window.addEventListener("keydown", onKeydown);
     return () => {
+      clearTimeout(safetyTimer);
       window.removeEventListener("focus", onFocus);
       window.removeEventListener("blur", onBlur);
       window.removeEventListener("keydown", onKeydown);
       if (unlistenBg) unlistenBg();
       if (unlistenGrab) unlistenGrab();
     };
-  }, [reset, draw, initCanvas, loadBackground, exportCapture, exportFullDesktop, pinCapture, hideOverlay, closeOverlay]);
+  }, [reset, draw, initCanvas, loadBackground, signalReady, exportCapture, exportFullDesktop, pinCapture, hideOverlay, closeOverlay]);
 
   // ── Mouse handlers ────────────────────────────────────────────────────
   const onMouseDown = (e: React.MouseEvent) => {

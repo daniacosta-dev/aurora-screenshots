@@ -1,8 +1,10 @@
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use image::{
-    codecs::png::{CompressionType, FilterType, PngEncoder},
-    imageops, DynamicImage, ImageBuffer, ImageEncoder, ImageFormat, Rgba, RgbaImage,
+    codecs::jpeg::JpegEncoder,
+    codecs::png::PngEncoder,
+    DynamicImage, ImageBuffer, ImageEncoder, ImageFormat, Rgba, RgbaImage,
 };
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::io::Cursor;
 use thiserror::Error;
@@ -23,6 +25,17 @@ pub struct CaptureResult {
     pub thumbnail: String, // base64 PNG reducido (240x160 max)
     pub width: u32,
     pub height: u32,
+}
+
+/// Un monitor capturado como JPEG con su posición en el desktop virtual.
+/// El frontend dibuja cada uno en el canvas en su posición exacta — sin compositing en Rust.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct MonitorCapture {
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+    pub data: String, // base64 JPEG
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -117,48 +130,48 @@ pub async fn capture_area_wayland_interactive() -> Result<CaptureResult, Capture
     process_image(img, width, height)
 }
 
-/// Captura el escritorio completo (todos los monitores) en X11 y retorna base64 PNG.
-/// Se usa como fondo "congelado" para el overlay de captura.
-pub fn capture_full_desktop_x11(
-    min_x: i32,
-    min_y: i32,
-    total_w: u32,
-    total_h: u32,
-) -> Result<String, CaptureError> {
+/// Captura todos los monitores en paralelo (rayon) y devuelve cada uno como JPEG.
+/// El frontend dibuja cada monitor en el canvas en su posición — sin compositing en Rust.
+pub fn capture_monitors_x11(min_x: i32, min_y: i32) -> Result<Vec<MonitorCapture>, CaptureError> {
+    let t0 = std::time::Instant::now();
+
     let screens = screenshots::Screen::all()
         .map_err(|e| CaptureError::Capture(format!("Error enumerando pantallas: {e}")))?;
 
-    let mut canvas: ImageBuffer<Rgba<u8>, Vec<u8>> = ImageBuffer::new(total_w, total_h);
+    let results: Result<Vec<MonitorCapture>, CaptureError> = screens
+        .par_iter()
+        .map(|screen| {
+            let info = screen.display_info;
+            let t_cap = std::time::Instant::now();
 
-    for screen in screens {
-        let info = screen.display_info;
-        let shot = screen
-            .capture()
-            .map_err(|e| CaptureError::Capture(format!("Error capturando monitor: {e}")))?;
-        let raw = shot.into_raw();
-        let monitor_img =
-            ImageBuffer::<Rgba<u8>, Vec<u8>>::from_raw(info.width, info.height, raw)
+            let shot = screen
+                .capture()
+                .map_err(|e| CaptureError::Capture(format!("Error capturando monitor: {e}")))?;
+            eprintln!("[timing] monitor {}x{} captured: {}ms", info.width, info.height, t_cap.elapsed().as_millis());
+
+            let raw = shot.into_raw();
+            let rgba = ImageBuffer::<Rgba<u8>, Vec<u8>>::from_raw(info.width, info.height, raw)
                 .ok_or_else(|| CaptureError::ImageProcessing("Buffer RGBA inválido".into()))?;
 
-        let dest_x = (info.x - min_x) as i64;
-        let dest_y = (info.y - min_y) as i64;
-        imageops::replace(&mut canvas, &monitor_img, dest_x, dest_y);
-    }
+            // RGBA → RGB → JPEG (sin compositing global)
+            let rgb = DynamicImage::ImageRgba8(rgba).to_rgb8();
+            let mut buf = Cursor::new(Vec::new());
+            JpegEncoder::new_with_quality(&mut buf, 95)
+                .encode_image(&DynamicImage::ImageRgb8(rgb))
+                .map_err(|e| CaptureError::ImageProcessing(format!("JPEG encode error: {e}")))?;
 
-    let mut buf = Cursor::new(Vec::new());
-    PngEncoder::new_with_quality(&mut buf, CompressionType::Fast, FilterType::Sub)
-        .write_image(
-            canvas.as_raw(),
-            total_w,
-            total_h,
-            image::ExtendedColorType::Rgba8,
-        )
-        .map_err(|e| CaptureError::ImageProcessing(format!("PNG fast encode error: {e}")))?;
+            Ok(MonitorCapture {
+                x: info.x - min_x,
+                y: info.y - min_y,
+                width: info.width,
+                height: info.height,
+                data: STANDARD.encode(buf.into_inner()),
+            })
+        })
+        .collect();
 
-    // Liberar el canvas RGBA (~8 MB) antes de alocar el string base64.
-    drop(canvas);
-
-    Ok(STANDARD.encode(buf.into_inner()))
+    eprintln!("[timing] capture_monitors_x11 TOTAL: {}ms", t0.elapsed().as_millis());
+    results
 }
 
 /// Genera una miniatura base64 a partir de bytes PNG crudos.

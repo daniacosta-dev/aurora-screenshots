@@ -39,7 +39,7 @@ pub fn setup_and_grab(xid: u32) -> Result<(), String> {
     let _ = conn.flush();
     eprintln!("[x11_grab] raise+focus sent, sleeping 80ms...");
 
-    std::thread::sleep(std::time::Duration::from_millis(80));
+    std::thread::sleep(std::time::Duration::from_millis(20));
 
     eprintln!("[x11_grab] attempting grab_pointer...");
     match conn.grab_pointer(

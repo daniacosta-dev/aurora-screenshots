@@ -32,7 +32,7 @@ pub fn clear_history(state: State<AppState>) -> Result<(), String> {
 
 /// Lógica compartida para iniciar la captura de área.
 /// Llamada tanto desde el shortcut global como desde el botón del frontend.
-pub(crate) fn show_capture_overlay(app: &tauri::AppHandle) {
+pub(crate) fn show_capture_overlay(app: &tauri::AppHandle, from_tray: bool) {
     // Cerrar la ventana de historial al iniciar captura: libera el proceso WebKit
     // para que el overlay no tenga que competir con él (evita 2 procesos simultáneos).
     // El historial se mantiene caliente solo entre aperturas del tray (hide_main_window).
@@ -70,14 +70,16 @@ pub(crate) fn show_capture_overlay(app: &tauri::AppHandle) {
                     };
                 }
 
-                // El menú del tray cierra en ~30ms. 100ms es suficiente margen sin
-                // agregar latencia innecesaria al usuario.
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                // El menú del tray tarda ~30ms en cerrarse antes de capturar.
+                // Si viene de shortcut, no hay menú abierto — sin sleep.
+                if from_tray {
+                    tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+                }
 
                 // Arrancar la captura del fondo en paralelo con la preparación de la ventana.
                 // Así no pagamos ambos costos en secuencia.
                 let bg_task = tokio::task::spawn_blocking(move || {
-                    capture::capture_full_desktop_x11(min_x, min_y, total_w, total_h)
+                    capture::capture_monitors_x11(min_x, min_y)
                 });
 
                 // Preparar la ventana overlay MIENTRAS la captura corre en background.
@@ -166,59 +168,31 @@ pub(crate) fn show_capture_overlay(app: &tauri::AppHandle) {
                     };
                 }
 
-                eprintln!("[show_overlay] calling overlay.show()");
-                let _ = overlay.show();
-
                 if has_bg {
+                    // El fondo ya está en AppState. El frontend lo cargará en canvas y,
+                    // cuando termine de dibujar, llamará overlay_ready para hacer show().
+                    // Así el overlay aparece directamente con la imagen, sin flash negro.
+                    eprintln!("[show_overlay] emitting background-ready (show deferred to overlay_ready)");
                     let _ = overlay.emit("background-ready", ());
-                }
-
-                // X11 mapea la ventana rápido. 30ms es suficiente en lugar de 60ms.
-                tokio::time::sleep(std::time::Duration::from_millis(30)).await;
-
-                    // Si en la primera captura no teníamos XID, intentar obtenerlo ahora.
-                    #[cfg(target_os = "linux")]
-                    let xid: Option<u32> = if xid_pre.is_some() {
-                        xid_pre
-                    } else {
-                        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-                        let post = match overlay.window_handle() {
-                            Ok(handle) => match handle.as_raw() {
-                                RawWindowHandle::Xcb(h) => Some(h.window.get()),
-                                RawWindowHandle::Xlib(h) => Some(h.window as u32),
-                                _ => None,
-                            },
-                            Err(e) => { eprintln!("[show_overlay] post-show window_handle error: {e}"); None }
-                        };
-                        if let Some(id) = post {
-                            let state = app.state::<AppState>();
-                            if let Ok(mut stored) = state.overlay_xid.lock() { *stored = Some(id); }
-                            eprintln!("[show_overlay] xid stored post-show: {id}");
-                        }
-                        post
-                    };
-
-                    eprintln!("[show_overlay] xid={xid:?}");
-
-                    // set_focus() fuerza a GTK a enfocar la WebView internamente.
+                } else {
+                    // Sin fondo: mostrar de inmediato (fallback, no debería ocurrir normalmente).
+                    eprintln!("[show_overlay] no bg, showing immediately");
+                    let _ = overlay.show();
+                    tokio::time::sleep(std::time::Duration::from_millis(15)).await;
                     let _ = overlay.set_focus();
                     let _ = overlay.set_ignore_cursor_events(false);
-                    eprintln!("[show_overlay] set_focus + set_ignore_cursor_events done");
-
                     #[cfg(target_os = "linux")]
-                    if let Some(xid) = xid {
+                    if let Some(xid) = xid_pre {
                         let overlay_grab = overlay.clone();
                         tokio::task::spawn_blocking(move || {
                             if let Err(e) = crate::x11_grab::setup_and_grab(xid) {
                                 eprintln!("[show_overlay] setup_and_grab error: {e}");
                             }
-                            // set_focus() DESPUÉS del grab: GTK recibe el FocusIn ya con
-                            // el grab activo, evitando el bug de "primer teclazo da foco,
-                            // segundo ejecuta la acción".
                             let _ = overlay_grab.set_focus();
                             let _ = overlay_grab.emit("grab-ready", ());
                         });
                     }
+                }
             }
 
             capture::DisplayServer::Wayland => {
@@ -256,10 +230,71 @@ pub(crate) fn show_capture_overlay(app: &tauri::AppHandle) {
     });
 }
 
+/// El frontend llama a este comando cuando ha terminado de renderizar el fondo en canvas.
+/// Hace show() del overlay y establece el grab de input — garantiza que el overlay
+/// aparezca directamente con la imagen cargada, sin flash negro previo.
+#[tauri::command]
+pub async fn overlay_ready(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    let overlay = match app.get_webview_window("capture-overlay") {
+        Some(w) => w,
+        None => {
+            eprintln!("[overlay_ready] no overlay window");
+            return Ok(());
+        }
+    };
+
+    eprintln!("[overlay_ready] showing overlay");
+    let _ = overlay.show();
+
+    tokio::time::sleep(std::time::Duration::from_millis(15)).await;
+
+    // Intentar obtener el XID del estado; si no está, leerlo del handle post-show.
+    #[cfg(target_os = "linux")]
+    let xid: Option<u32> = {
+        let stored = state.overlay_xid.lock().ok().and_then(|g| *g);
+        if stored.is_some() {
+            stored
+        } else {
+            use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+            let post = match overlay.window_handle() {
+                Ok(handle) => match handle.as_raw() {
+                    RawWindowHandle::Xcb(h) => Some(h.window.get()),
+                    RawWindowHandle::Xlib(h) => Some(h.window as u32),
+                    _ => None,
+                },
+                Err(e) => { eprintln!("[overlay_ready] window_handle error: {e}"); None }
+            };
+            if let Some(id) = post {
+                if let Ok(mut s) = state.overlay_xid.lock() { *s = Some(id); }
+                eprintln!("[overlay_ready] xid obtained post-show: {id}");
+            }
+            post
+        }
+    };
+
+    eprintln!("[overlay_ready] xid={xid:?}");
+    let _ = overlay.set_focus();
+    let _ = overlay.set_ignore_cursor_events(false);
+
+    #[cfg(target_os = "linux")]
+    if let Some(xid) = xid {
+        let overlay_grab = overlay.clone();
+        tokio::task::spawn_blocking(move || {
+            if let Err(e) = crate::x11_grab::setup_and_grab(xid) {
+                eprintln!("[overlay_ready] setup_and_grab error: {e}");
+            }
+            let _ = overlay_grab.set_focus();
+            let _ = overlay_grab.emit("grab-ready", ());
+        });
+    }
+
+    Ok(())
+}
+
 /// Comando Tauri para iniciar captura (llamado desde el botón del frontend).
 #[tauri::command]
 pub fn start_area_capture(app: tauri::AppHandle) -> Result<(), String> {
-    show_capture_overlay(&app);
+    show_capture_overlay(&app, false);
     Ok(())
 }
 
@@ -429,7 +464,7 @@ pub fn update_capture_shortcut(
     app.global_shortcut()
         .on_shortcut(new_sc, |app, _sc, event| {
             if event.state() == ShortcutState::Pressed {
-                show_capture_overlay(app);
+                show_capture_overlay(app, false);
             }
         })
         .map_err(|e| e.to_string())?;
@@ -505,9 +540,10 @@ pub fn hide_main_window(app: tauri::AppHandle) -> Result<(), String> {
 /// Retorna el screenshot del escritorio capturado antes de mostrar el overlay.
 /// Usa take() en lugar de clone() para mover el String fuera del AppState:
 /// evita tener dos copias de ~15-20 MB vivas durante el IPC.
+/// Retorna los monitores capturados como JPEG individuales con su posición.
 /// Después de esta llamada desktop_background queda en None — el frontend ya tiene el dato.
 #[tauri::command]
-pub fn get_desktop_background(state: State<AppState>) -> Result<Option<String>, String> {
+pub fn get_desktop_background(state: State<AppState>) -> Result<Option<Vec<capture::MonitorCapture>>, String> {
     let mut bg = state.desktop_background.lock().map_err(|e| e.to_string())?;
     Ok(bg.take())
 }

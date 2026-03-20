@@ -19,8 +19,8 @@ pub struct AppState {
     pub db: Mutex<rusqlite::Connection>,
     /// Origen del virtual desktop (min_x, min_y de todos los monitores).
     pub overlay_offset: Mutex<(i32, i32)>,
-    /// Screenshot del escritorio capturado justo antes de mostrar el overlay (base64 PNG).
-    pub desktop_background: Mutex<Option<String>>,
+    /// Monitores capturados como JPEG individuales para el overlay (sin compositing en Rust).
+    pub desktop_background: Mutex<Option<Vec<capture::MonitorCapture>>>,
     /// XID de la ventana capture-overlay (se guarda en la primera captura para reusar).
     pub overlay_xid: Mutex<Option<u32>>,
     /// Imágenes de capturas pinadas pendientes de ser leídas por su ventana.
@@ -88,6 +88,7 @@ pub fn run() {
             commands::open_screenshots_folder,
             commands::get_autostart,
             commands::set_autostart,
+            commands::overlay_ready,
         ])
         .build(tauri::generate_context!())
         .expect("error while running tauri application")
@@ -138,7 +139,7 @@ fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         .menu(&menu)
         .tooltip("Aurora Screenshots")
         .on_menu_event(|app, event| match event.id.as_ref() {
-            "capture" => commands::show_capture_overlay(app),
+            "capture" => commands::show_capture_overlay(app, true),
             "history" => show_history_window(app),
             "quit" => app.exit(0),
             _ => {}
@@ -211,7 +212,7 @@ fn register_shortcut(app: &tauri::App, shortcut_str: &str) -> Result<(), Box<dyn
     app.global_shortcut()
         .on_shortcut(shortcut, |app, _shortcut, event| {
             if event.state() == ShortcutState::Pressed {
-                commands::show_capture_overlay(app);
+                commands::show_capture_overlay(app, false);
             }
         })?;
 
