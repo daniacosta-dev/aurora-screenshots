@@ -115,11 +115,13 @@ pub async fn capture_area_wayland_interactive() -> Result<CaptureResult, Capture
         .map_err(|e| CaptureError::Capture(format!("Portal response error: {e}")))?;
 
     let uri = response.uri();
-    let path = std::path::PathBuf::from(uri.path());
+    eprintln!("[wayland] portal URI: {uri}");
+
+    let path = uri.to_file_path()
+        .map_err(|_| CaptureError::Capture(format!("URI no es un path local válido: {uri}")))?;
 
     let data = std::fs::read(&path)
         .map_err(|e| CaptureError::Capture(format!("No se pudo leer la captura: {e}")))?;
-
     let _ = std::fs::remove_file(&path);
 
     let img = image::load_from_memory(&data)
@@ -128,6 +130,111 @@ pub async fn capture_area_wayland_interactive() -> Result<CaptureResult, Capture
     let width = img.width();
     let height = img.height();
     process_image(img, width, height)
+}
+
+/// Captura la pantalla completa en Wayland.
+/// Intenta el portal XDG primero (universal); si falla, usa GNOME Shell D-Bus como fallback.
+/// Devuelve Vec<MonitorCapture> compatible con el flujo X11 del frontend.
+pub async fn capture_monitors_wayland() -> Result<Vec<MonitorCapture>, CaptureError> {
+    // Intento 1: portal XDG con interactive(false)
+    match capture_via_portal_noninteractive().await {
+        Ok(monitors) => return Ok(monitors),
+        Err(e) => eprintln!("[wayland] portal non-interactive failed ({e}), trying GNOME Shell fallback..."),
+    }
+
+    // Intento 2: GNOME Shell D-Bus via gdbus (no requiere permisos extra)
+    match capture_via_gnome_shell().await {
+        Ok(monitors) => return Ok(monitors),
+        Err(e) => eprintln!("[wayland] GNOME Shell fallback failed: {e}"),
+    }
+
+    Err(CaptureError::Capture(
+        "No se pudo capturar la pantalla. Intentá otorgar permisos de captura en Configuración → Privacidad → Pantalla.".to_string(),
+    ))
+}
+
+async fn capture_via_portal_noninteractive() -> Result<Vec<MonitorCapture>, CaptureError> {
+    let response = ashpd::desktop::screenshot::Screenshot::request()
+        .interactive(false)
+        .send()
+        .await
+        .map_err(|e| CaptureError::Capture(format!("XDG Portal error: {e}")))?
+        .response()
+        .map_err(|e| CaptureError::Capture(format!("Portal response error: {e}")))?;
+
+    let uri = response.uri();
+    let path = uri.to_file_path()
+        .map_err(|_| CaptureError::Capture(format!("URI inválido: {uri}")))?;
+
+    let data = std::fs::read(&path)
+        .map_err(|e| CaptureError::Capture(format!("No se pudo leer la captura: {e}")))?;
+    let _ = std::fs::remove_file(&path);
+
+    image_bytes_to_monitor_captures(&data)
+}
+
+/// Usa la API D-Bus de GNOME Shell para capturar la pantalla completa.
+/// No requiere permisos del portal — funciona en cualquier sesión GNOME Wayland.
+async fn capture_via_gnome_shell() -> Result<Vec<MonitorCapture>, CaptureError> {
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let path = format!("/tmp/aurora-shot-{ts}.png");
+
+    // org.gnome.Shell.Screenshot.Screenshot(include_cursor, flash, filename)
+    let output = tokio::process::Command::new("gdbus")
+        .args([
+            "call", "--session",
+            "--dest", "org.gnome.Shell.Screenshot",
+            "--object-path", "/org/gnome/Shell/Screenshot",
+            "--method", "org.gnome.Shell.Screenshot.Screenshot",
+            "false", "false", &path,
+        ])
+        .output()
+        .await
+        .map_err(|e| CaptureError::Capture(format!("gdbus not found: {e}")))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(CaptureError::Capture(format!("GNOME Shell screenshot failed: {stderr}")));
+    }
+
+    // gdbus devuelve "(true, 'path')" — verificar el booleano
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if stdout.trim_start().starts_with("(false") {
+        return Err(CaptureError::Capture("GNOME Shell Screenshot returned false".to_string()));
+    }
+
+    let data = std::fs::read(&path)
+        .map_err(|e| CaptureError::Capture(format!("No se pudo leer screenshot: {e}")))?;
+    let _ = std::fs::remove_file(&path);
+
+    image_bytes_to_monitor_captures(&data)
+}
+
+/// Convierte bytes PNG/imagen en Vec<MonitorCapture> (un solo monitor, posición 0,0).
+fn image_bytes_to_monitor_captures(data: &[u8]) -> Result<Vec<MonitorCapture>, CaptureError> {
+    let img = image::load_from_memory(data)
+        .map_err(|e| CaptureError::ImageProcessing(format!("Imagen inválida: {e}")))?;
+
+    let width = img.width();
+    let height = img.height();
+    eprintln!("[wayland] captured: {width}x{height}");
+
+    let rgb = img.to_rgb8();
+    let mut buf = std::io::Cursor::new(Vec::new());
+    JpegEncoder::new_with_quality(&mut buf, 95)
+        .encode_image(&DynamicImage::ImageRgb8(rgb))
+        .map_err(|e| CaptureError::ImageProcessing(format!("JPEG encode error: {e}")))?;
+
+    Ok(vec![MonitorCapture {
+        x: 0,
+        y: 0,
+        width,
+        height,
+        data: STANDARD.encode(buf.into_inner()),
+    }])
 }
 
 /// Captura todos los monitores en paralelo (rayon) y devuelve cada uno como JPEG.

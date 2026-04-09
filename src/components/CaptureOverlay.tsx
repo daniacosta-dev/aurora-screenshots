@@ -597,6 +597,85 @@ function CaptureOverlay() {
     }
   }, []);
 
+  // ── Load Wayland pending capture (Wayland annotation mode) ───────────────
+
+  // Espera hasta que la ventana tenga dimensiones de pantalla completa o timeout.
+  const waitForFullscreen = useCallback((): Promise<void> => {
+    return new Promise((resolve) => {
+      const startW = window.innerWidth;
+      const startH = window.innerHeight;
+      // Si ya parece fullscreen (> 1000px), resolver inmediatamente.
+      if (startW > 1000 && startH > 600) { resolve(); return; }
+      // Si no, esperar el evento resize o un timeout de 400ms.
+      const timeout = setTimeout(resolve, 400);
+      const onResize = () => {
+        clearTimeout(timeout);
+        window.removeEventListener("resize", onResize);
+        resolve();
+      };
+      window.addEventListener("resize", onResize);
+    });
+  }, []);
+
+  const loadWaylandCapture = useCallback(async (): Promise<boolean> => {
+    type WaylandCapture = { content: string; thumbnail: string; width: number; height: number };
+    let result: WaylandCapture | null = null;
+    try {
+      result = await invoke<WaylandCapture | null>("get_wayland_pending_capture");
+    } catch {
+      return false;
+    }
+    if (!result) return false;
+
+    return new Promise<boolean>((resolve) => {
+      const img = new Image();
+      img.onload = async () => {
+        bgDataRef.current = result!.content;
+
+        // Esperar a que el compositor termine de mapear la ventana fullscreen.
+        await waitForFullscreen();
+
+        initCanvas();
+        const W = window.innerWidth;
+        const H = window.innerHeight;
+        const dpr = window.devicePixelRatio || 1;
+        const naturalW = img.naturalWidth;
+        const naturalH = img.naturalHeight;
+
+        // Tamaño lógico de la imagen (el portal ya devuelve píxeles físicos)
+        const logW = naturalW / dpr;
+        const logH = naturalH / dpr;
+
+        // Centrar la imagen en la ventana fullscreen
+        const imgX = Math.round((W - logW) / 2);
+        const imgY = Math.round((H - logH) / 2);
+
+        // Composite: canvas del tamaño de la ventana con la imagen centrada.
+        // El resto queda transparente → draw() muestra el overlay oscuro de la app.
+        // Permite que draw()/exportCapture() funcionen sin cambios usando bg.naturalWidth/W.
+        const composite = document.createElement("canvas");
+        composite.width = W * dpr;
+        composite.height = H * dpr;
+        composite.getContext("2d")!.drawImage(img, imgX * dpr, imgY * dpr, naturalW, naturalH);
+
+        const compositeImg = new Image();
+        compositeImg.onload = () => {
+          bgImageRef.current = compositeImg;
+          startPos.current = { x: imgX, y: imgY };
+          endPos.current = { x: imgX + logW, y: imgY + logH };
+          phase.current = "annotating";
+          setDisplayPhase("annotating");
+          draw();
+          resolve(true);
+        };
+        compositeImg.onerror = () => resolve(false);
+        compositeImg.src = composite.toDataURL("image/jpeg", 0.97);
+      };
+      img.onerror = () => resolve(false);
+      img.src = `data:image/png;base64,${result!.content}`;
+    });
+  }, [draw, initCanvas, waitForFullscreen]);
+
   // ── Load background screenshot ─────────────────────────────────────────
   const loadBackground = useCallback(async () => {
     try {
@@ -874,9 +953,11 @@ function CaptureOverlay() {
   useEffect(() => {
     initCanvas();
     draw();
-    // Para ventanas recién creadas (después de ESC): el background ya está en AppState
-    // pero background-ready y onFocus se perdieron porque React aún no había montado.
-    loadBackground();
+    // Chequear primero si hay una captura Wayland pendiente (race con wayland-capture-ready).
+    // Si la hay, ir directo a annotating; si no, cargar el background X11.
+    loadWaylandCapture().then((loaded) => {
+      if (!loaded) loadBackground();
+    });
 
     // Fallback: si la carga del fondo falla o demora demasiado, mostrar el overlay
     // de todas formas después de 800ms para no dejar la ventana oculta para siempre.
@@ -913,6 +994,17 @@ function CaptureOverlay() {
     listen("grab-ready", async () => {
       await getCurrentWindow().setFocus();
     }).then((fn) => { unlistenGrab = fn; });
+
+    // En Wayland, el portal XDG ya hizo la selección de región.
+    // Rust emite este evento con la imagen lista; vamos directo a la fase de anotación.
+    let unlistenWayland: (() => void) | null = null;
+    listen("wayland-capture-ready", async () => {
+      console.log("[overlay] wayland-capture-ready received, phase:", phase.current);
+      // Si el mount effect ya cargó la imagen (ventana nueva), no hacer nada.
+      // Si la ventana se reusa (phase sigue en idle), cargar ahora.
+      if (phase.current !== "idle") return;
+      await loadWaylandCapture();
+    }).then((fn) => { unlistenWayland = fn; });
 
     const onKeydown = async (e: KeyboardEvent) => {
       console.log("[overlay] keydown:", e.key, "ctrl:", e.ctrlKey, "phase:", phase.current, "hasFocus:", document.hasFocus());
@@ -973,8 +1065,9 @@ function CaptureOverlay() {
       window.removeEventListener("keydown", onKeydown);
       if (unlistenBg) unlistenBg();
       if (unlistenGrab) unlistenGrab();
+      if (unlistenWayland) unlistenWayland();
     };
-  }, [reset, draw, initCanvas, loadBackground, signalReady, exportCapture, exportFullDesktop, pinCapture, hideOverlay, closeOverlay]);
+  }, [reset, draw, initCanvas, loadBackground, loadWaylandCapture, waitForFullscreen, signalReady, exportCapture, exportFullDesktop, pinCapture, hideOverlay, closeOverlay]);
 
   // ── Mouse handlers ────────────────────────────────────────────────────
   const onMouseDown = (e: React.MouseEvent) => {

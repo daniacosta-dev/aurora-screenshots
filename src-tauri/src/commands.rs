@@ -196,33 +196,63 @@ pub(crate) fn show_capture_overlay(app: &tauri::AppHandle, from_tray: bool) {
             }
 
             capture::DisplayServer::Wayland => {
-                // Para Wayland el portal maneja la selección interactiva
+                // El portal XDG maneja la selección interactiva de región.
+                // Después de capturar, abrimos el overlay de anotación con la imagen.
+                eprintln!("[show_overlay wayland] calling portal (interactive)...");
                 match capture::capture_area_wayland_interactive().await {
                     Ok(result) => {
-                        let png_bytes = match STANDARD.decode(&result.content) {
-                            Ok(b) => b,
-                            Err(e) => { eprintln!("Error decodificando captura Wayland: {e}"); return; }
-                        };
-                        if let Err(e) = clipboard::copy_png_bytes_to_clipboard(&png_bytes) {
-                            eprintln!("Error copiando al clipboard (Wayland): {e}");
+                        let img_w = result.width;
+                        let img_h = result.height;
+                        eprintln!("[show_overlay wayland] portal OK: {img_w}x{img_h}");
+
+                        {
+                            let state = app.state::<AppState>();
+                            if let Ok(mut pending) = state.wayland_pending_capture.lock() {
+                                *pending = Some(result);
+                            };
                         }
-                        let path = match save_png_bytes_to_disk(&png_bytes) {
-                            Ok(p) => p,
-                            Err(e) => { eprintln!("Error guardando captura Wayland: {e}"); return; }
+
+                        let overlay = match app.get_webview_window("capture-overlay") {
+                            Some(w) => w,
+                            None => {
+                                match tauri::WebviewWindowBuilder::new(
+                                    &app,
+                                    "capture-overlay",
+                                    tauri::WebviewUrl::App("index.html".into()),
+                                )
+                                .transparent(false)
+                                .decorations(false)
+                                .always_on_top(true)
+                                .skip_taskbar(true)
+                                .visible(false)
+                                .resizable(true)
+                                .inner_size(800.0, 600.0)
+                                .build() {
+                                    Ok(w) => {
+                                        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                                        w
+                                    }
+                                    Err(e) => {
+                                        eprintln!("[show_overlay wayland] failed to create overlay: {e}");
+                                        return;
+                                    }
+                                }
+                            }
                         };
-                        let state = app.state::<AppState>();
-                        if let Ok(db) = state.db.lock() {
-                            let _ = db::insert_entry(
-                                &db,
-                                "image",
-                                &path,
-                                Some(&result.thumbnail),
-                            );
-                        }
-                        let _ = app.emit("history-updated", ());
+
+                        // Fullscreen antes de show() para que el compositor asigne las
+                        // dimensiones correctas desde el primer map — sin flash de tamaño intermedio.
+                        let _ = overlay.set_fullscreen(true);
+                        let _ = overlay.show();
+                        let _ = overlay.set_focus();
+
+                        // Esperar a que el compositor mapee la ventana y React monte.
+                        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+                        eprintln!("[show_overlay wayland] emitting wayland-capture-ready");
+                        let _ = overlay.emit("wayland-capture-ready", ());
                     }
                     Err(e) => {
-                        eprintln!("Captura Wayland fallida: {e}");
+                        eprintln!("[show_overlay wayland] capture FAILED: {e}");
                     }
                 }
             }
@@ -233,6 +263,7 @@ pub(crate) fn show_capture_overlay(app: &tauri::AppHandle, from_tray: bool) {
 /// El frontend llama a este comando cuando ha terminado de renderizar el fondo en canvas.
 /// Hace show() del overlay y establece el grab de input — garantiza que el overlay
 /// aparezca directamente con la imagen cargada, sin flash negro previo.
+/// Solo relevante en X11; en Wayland el overlay ya está visible antes de este llamado.
 #[tauri::command]
 pub async fn overlay_ready(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<(), String> {
     let overlay = match app.get_webview_window("capture-overlay") {
@@ -248,47 +279,55 @@ pub async fn overlay_ready(app: tauri::AppHandle, state: State<'_, AppState>) ->
 
     tokio::time::sleep(std::time::Duration::from_millis(15)).await;
 
-    // Intentar obtener el XID del estado; si no está, leerlo del handle post-show.
-    #[cfg(target_os = "linux")]
-    let xid: Option<u32> = {
-        let stored = state.overlay_xid.lock().ok().and_then(|g| *g);
-        if stored.is_some() {
-            stored
-        } else {
-            use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-            let post = match overlay.window_handle() {
-                Ok(handle) => match handle.as_raw() {
-                    RawWindowHandle::Xcb(h) => Some(h.window.get()),
-                    RawWindowHandle::Xlib(h) => Some(h.window as u32),
-                    _ => None,
-                },
-                Err(e) => { eprintln!("[overlay_ready] window_handle error: {e}"); None }
-            };
-            if let Some(id) = post {
-                if let Ok(mut s) = state.overlay_xid.lock() { *s = Some(id); }
-                eprintln!("[overlay_ready] xid obtained post-show: {id}");
-            }
-            post
-        }
-    };
-
-    eprintln!("[overlay_ready] xid={xid:?}");
     let _ = overlay.set_focus();
     let _ = overlay.set_ignore_cursor_events(false);
 
+    // Input grab: solo en X11. En Wayland no hay XID ni grab_pointer/keyboard.
     #[cfg(target_os = "linux")]
-    if let Some(xid) = xid {
-        let overlay_grab = overlay.clone();
-        tokio::task::spawn_blocking(move || {
-            if let Err(e) = crate::x11_grab::setup_and_grab(xid) {
-                eprintln!("[overlay_ready] setup_and_grab error: {e}");
+    if state.display_server == capture::DisplayServer::X11 {
+        let xid: Option<u32> = {
+            let stored = state.overlay_xid.lock().ok().and_then(|g| *g);
+            if stored.is_some() {
+                stored
+            } else {
+                use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+                let post = match overlay.window_handle() {
+                    Ok(handle) => match handle.as_raw() {
+                        RawWindowHandle::Xcb(h) => Some(h.window.get()),
+                        RawWindowHandle::Xlib(h) => Some(h.window as u32),
+                        _ => None,
+                    },
+                    Err(e) => { eprintln!("[overlay_ready] window_handle error: {e}"); None }
+                };
+                if let Some(id) = post {
+                    if let Ok(mut s) = state.overlay_xid.lock() { *s = Some(id); }
+                    eprintln!("[overlay_ready] xid obtained post-show: {id}");
+                }
+                post
             }
-            let _ = overlay_grab.set_focus();
-            let _ = overlay_grab.emit("grab-ready", ());
-        });
+        };
+        eprintln!("[overlay_ready] xid={xid:?}");
+        if let Some(xid) = xid {
+            let overlay_grab = overlay.clone();
+            tokio::task::spawn_blocking(move || {
+                if let Err(e) = crate::x11_grab::setup_and_grab(xid) {
+                    eprintln!("[overlay_ready] setup_and_grab error: {e}");
+                }
+                let _ = overlay_grab.set_focus();
+                let _ = overlay_grab.emit("grab-ready", ());
+            });
+        }
     }
 
     Ok(())
+}
+
+/// Retorna (y consume) la captura Wayland pendiente de anotación.
+/// Llamado por el frontend al recibir el evento "wayland-capture-ready".
+#[tauri::command]
+pub fn get_wayland_pending_capture(state: State<AppState>) -> Result<Option<capture::CaptureResult>, String> {
+    let mut pending = state.wayland_pending_capture.lock().map_err(|e| e.to_string())?;
+    Ok(pending.take())
 }
 
 /// Comando Tauri para iniciar captura (llamado desde el botón del frontend).
@@ -324,6 +363,12 @@ pub fn finalize_area_capture(
     let abs_y = (y as f64 * dpr).round() as i32 + offset_y;
     let abs_w = (width as f64 * dpr).round() as u32;
     let abs_h = (height as f64 * dpr).round() as u32;
+
+    // finalize_area_capture solo es válido en X11 (el overlay X11 envía coordenadas).
+    // En Wayland el portal maneja la selección y el resultado va por finalize_annotated_capture.
+    if state.display_server == capture::DisplayServer::Wayland {
+        return Err("finalize_area_capture no está disponible en Wayland".to_string());
+    }
 
     // Ungrab inmediato para liberar el input antes de cualquier otra cosa.
     #[cfg(target_os = "linux")]
@@ -402,10 +447,12 @@ pub fn copy_history_item(state: State<AppState>, id: i64) -> Result<(), String> 
 
 /// Oculta el overlay de captura desde el frontend (más confiable que la API JS en Tauri).
 #[tauri::command]
-pub fn hide_capture_overlay(app: tauri::AppHandle) -> Result<(), String> {
+pub fn hide_capture_overlay(state: State<AppState>, app: tauri::AppHandle) -> Result<(), String> {
     #[cfg(target_os = "linux")]
-    if let Err(e) = crate::x11_grab::ungrab_input() {
-        eprintln!("ungrab_input: {e}");
+    if state.display_server == capture::DisplayServer::X11 {
+        if let Err(e) = crate::x11_grab::ungrab_input() {
+            eprintln!("ungrab_input: {e}");
+        }
     }
     if let Some(overlay) = app.get_webview_window("capture-overlay") {
         let _ = overlay.hide();
@@ -419,7 +466,7 @@ pub fn hide_capture_overlay(app: tauri::AppHandle) -> Result<(), String> {
 #[tauri::command]
 pub fn close_capture_overlay(state: State<AppState>, app: tauri::AppHandle) -> Result<(), String> {
     #[cfg(target_os = "linux")]
-    {
+    if state.display_server == capture::DisplayServer::X11 {
         if let Err(e) = crate::x11_grab::ungrab_input() {
             eprintln!("ungrab_input: {e}");
         }
@@ -428,11 +475,13 @@ pub fn close_capture_overlay(state: State<AppState>, app: tauri::AppHandle) -> R
             *xid = None;
         }
     }
-    // Liberar el screenshot del escritorio al cancelar con ESC.
+    // Liberar datos de captura al cancelar con ESC.
     if let Ok(mut bg) = state.desktop_background.lock() {
         *bg = None;
     }
-    let _ = &state; // evita warning de unused en non-linux
+    if let Ok(mut pending) = state.wayland_pending_capture.lock() {
+        *pending = None;
+    }
     if let Some(overlay) = app.get_webview_window("capture-overlay") {
         let _ = overlay.close();
     }
@@ -557,8 +606,10 @@ pub fn finalize_annotated_capture(
     image_data: String,
 ) -> Result<(), String> {
     #[cfg(target_os = "linux")]
-    if let Err(e) = crate::x11_grab::ungrab_input() {
-        eprintln!("ungrab_input: {e}");
+    if state.display_server == capture::DisplayServer::X11 {
+        if let Err(e) = crate::x11_grab::ungrab_input() {
+            eprintln!("ungrab_input: {e}");
+        }
     }
 
     // Destruir el overlay después del export: la captura terminó, liberar memoria.

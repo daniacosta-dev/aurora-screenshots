@@ -17,6 +17,8 @@ pub const DEFAULT_CAPTURE_SHORTCUT: &str = "Ctrl+Shift+S";
 
 pub struct AppState {
     pub db: Mutex<rusqlite::Connection>,
+    /// Display server detectado al inicio (X11 o Wayland). Inmutable después del setup.
+    pub display_server: capture::DisplayServer,
     /// Origen del virtual desktop (min_x, min_y de todos los monitores).
     pub overlay_offset: Mutex<(i32, i32)>,
     /// Monitores capturados como JPEG individuales para el overlay (sin compositing en Rust).
@@ -27,6 +29,8 @@ pub struct AppState {
     pub pin_images: Mutex<std::collections::HashMap<String, String>>,
     /// Shortcut activo para captura (ej. "Ctrl+Shift+S"). Fuente de verdad en memoria.
     pub current_shortcut: Mutex<String>,
+    /// Captura Wayland pendiente de ser leída por el overlay para anotación.
+    pub wayland_pending_capture: Mutex<Option<capture::CaptureResult>>,
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -52,13 +56,19 @@ pub fn run() {
                 .flatten()
                 .unwrap_or_else(|| DEFAULT_CAPTURE_SHORTCUT.to_string());
 
+            let display_server = capture::detect_display_server()
+                .unwrap_or(capture::DisplayServer::X11);
+            eprintln!("[init] display server: {:?}", display_server);
+
             app.manage(AppState {
                 db: Mutex::new(conn),
+                display_server,
                 overlay_offset: Mutex::new((0, 0)),
                 desktop_background: Mutex::new(None),
                 overlay_xid: Mutex::new(None),
                 pin_images: Mutex::new(std::collections::HashMap::new()),
                 current_shortcut: Mutex::new(saved_shortcut.clone()),
+                wayland_pending_capture: Mutex::new(None),
             });
 
             setup_tray(app)?;
@@ -89,6 +99,7 @@ pub fn run() {
             commands::get_autostart,
             commands::set_autostart,
             commands::overlay_ready,
+            commands::get_wayland_pending_capture,
         ])
         .build(tauri::generate_context!())
         .expect("error while running tauri application")
