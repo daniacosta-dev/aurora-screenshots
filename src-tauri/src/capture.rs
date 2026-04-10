@@ -1,12 +1,12 @@
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use image::{
     codecs::jpeg::JpegEncoder,
-    codecs::png::PngEncoder,
-    DynamicImage, ImageBuffer, ImageEncoder, ImageFormat, Rgba, RgbaImage,
+    DynamicImage, ImageBuffer, ImageFormat, Rgba, RgbaImage,
 };
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::io::Cursor;
+use std::sync::{Arc, Mutex};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -136,20 +136,26 @@ pub async fn capture_area_wayland_interactive() -> Result<CaptureResult, Capture
 /// Intenta el portal XDG primero (universal); si falla, usa GNOME Shell D-Bus como fallback.
 /// Devuelve Vec<MonitorCapture> compatible con el flujo X11 del frontend.
 pub async fn capture_monitors_wayland() -> Result<Vec<MonitorCapture>, CaptureError> {
-    // Intento 1: portal XDG con interactive(false)
-    match capture_via_portal_noninteractive().await {
-        Ok(monitors) => return Ok(monitors),
-        Err(e) => eprintln!("[wayland] portal non-interactive failed ({e}), trying GNOME Shell fallback..."),
-    }
-
-    // Intento 2: GNOME Shell D-Bus via gdbus (no requiere permisos extra)
+    // Intento 1: GNOME Shell D-Bus (sin UI, sin permisos extra)
     match capture_via_gnome_shell().await {
         Ok(monitors) => return Ok(monitors),
-        Err(e) => eprintln!("[wayland] GNOME Shell fallback failed: {e}"),
+        Err(e) => eprintln!("[wayland] GNOME Shell D-Bus failed ({e}), trying wlroots fallback..."),
+    }
+
+    // Intento 2: grim (wlroots: Hyprland, Sway, etc.)
+    match capture_via_grim().await {
+        Ok(monitors) => return Ok(monitors),
+        Err(e) => eprintln!("[wayland] grim failed ({e}), trying XDG portal..."),
+    }
+
+    // Intento 3: portal XDG (puede mostrar diálogo de permisos)
+    match capture_via_portal_noninteractive().await {
+        Ok(monitors) => return Ok(monitors),
+        Err(e) => eprintln!("[wayland] portal non-interactive failed: {e}"),
     }
 
     Err(CaptureError::Capture(
-        "No se pudo capturar la pantalla. Intentá otorgar permisos de captura en Configuración → Privacidad → Pantalla.".to_string(),
+        "No se pudo capturar la pantalla. Instalá 'grim' (wlroots) o verificá permisos en Configuración → Privacidad → Pantalla.".to_string(),
     ))
 }
 
@@ -208,6 +214,33 @@ async fn capture_via_gnome_shell() -> Result<Vec<MonitorCapture>, CaptureError> 
 
     let data = std::fs::read(&path)
         .map_err(|e| CaptureError::Capture(format!("No se pudo leer screenshot: {e}")))?;
+    let _ = std::fs::remove_file(&path);
+
+    image_bytes_to_monitor_captures(&data)
+}
+
+/// Usa `grim` para capturar en compositors wlroots (Hyprland, Sway, river, etc.).
+/// Requiere que `grim` esté instalado: `sudo pacman -S grim` o `sudo apt install grim`.
+async fn capture_via_grim() -> Result<Vec<MonitorCapture>, CaptureError> {
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let path = format!("/tmp/aurora-shot-{ts}.png");
+
+    let output = tokio::process::Command::new("grim")
+        .arg(&path)
+        .output()
+        .await
+        .map_err(|e| CaptureError::Capture(format!("grim not found: {e}")))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(CaptureError::Capture(format!("grim failed: {stderr}")));
+    }
+
+    let data = std::fs::read(&path)
+        .map_err(|e| CaptureError::Capture(format!("No se pudo leer screenshot de grim: {e}")))?;
     let _ = std::fs::remove_file(&path);
 
     image_bytes_to_monitor_captures(&data)
@@ -314,4 +347,529 @@ fn process_image(img: DynamicImage, width: u32, height: u32) -> Result<CaptureRe
     let thumbnail = STANDARD.encode(thumb_buf.into_inner());
 
     Ok(CaptureResult { content, thumbnail, width, height })
+}
+
+// ─── PipeWire ScreenCast ──────────────────────────────────────────────────
+
+/// Captura la pantalla vía XDG ScreenCast + PipeWire.
+/// La primera vez muestra el diálogo de selección de GNOME; después usa el
+/// restore_token para saltar ese paso y capturar silenciosamente.
+/// Retorna (monitores, nuevo_token) — el token debe persistirse en la DB.
+pub async fn capture_via_screencast(
+    restore_token: Option<String>,
+) -> Result<(Vec<MonitorCapture>, Option<String>), CaptureError> {
+    use ashpd::desktop::screencast::{CursorMode, Screencast, SourceType};
+    use ashpd::desktop::PersistMode;
+
+    let proxy = Screencast::new()
+        .await
+        .map_err(|e| CaptureError::Capture(format!("ScreenCast portal: {e}")))?;
+
+    let session = proxy
+        .create_session()
+        .await
+        .map_err(|e| CaptureError::Capture(format!("create_session: {e}")))?;
+
+    proxy
+        .select_sources(
+            &session,
+            CursorMode::Hidden.into(),
+            SourceType::Monitor.into(),
+            true, // multiple monitors
+            restore_token.as_deref(),
+            PersistMode::ExplicitlyRevoked,
+        )
+        .await
+        .map_err(|e| CaptureError::Capture(format!("select_sources: {e}")))?;
+
+    let response = proxy
+        .start(&session, None)
+        .await
+        .map_err(|e| CaptureError::Capture(format!("start: {e}")))?
+        .response()
+        .map_err(|e| CaptureError::Capture(format!("start response: {e}")))?;
+
+    let new_token = response.restore_token().map(|t| t.to_string());
+    let streams: Vec<_> = response.streams().to_vec();
+    eprintln!("[screencast] {} stream(s), new_token={:?}", streams.len(), new_token);
+
+    let fd = proxy
+        .open_pipe_wire_remote(&session)
+        .await
+        .map_err(|e| CaptureError::Capture(format!("open_pipe_wire_remote: {e}")))?;
+
+    // (node_id, x, y) — position() devuelve Option<(i32, i32)>, default (0,0)
+    let stream_info: Vec<(u32, i32, i32)> = streams
+        .iter()
+        .map(|s| {
+            let pos = s.position().unwrap_or((0, 0));
+            eprintln!("[screencast] node={} pos=({},{})", s.pipe_wire_node_id(), pos.0, pos.1);
+            (s.pipe_wire_node_id(), pos.0, pos.1)
+        })
+        .collect();
+
+    let (mut monitors, uncaptured) = tokio::task::spawn_blocking(move || pipewire_capture_frames(fd, stream_info))
+        .await
+        .map_err(|_| CaptureError::Capture("PipeWire thread panicked".to_string()))?
+        .map_err(|e| CaptureError::Capture(format!("PipeWire capture: {e}")))?;
+
+    // Fallback para monitores que PipeWire no pudo capturar en sesiones multi-monitor.
+    // Usa gdbus Screenshot() completo + crop en memoria.
+    // ScreenshotArea() está prohibida para apps no-privilegiadas; Screenshot() sí funciona.
+    for (x, y, w, h) in uncaptured {
+        eprintln!("[screencast] fallback gnome-crop para monitor en ({x},{y})");
+        match capture_area_via_gnome_crop(x, y, w, h).await {
+            Ok(monitor) => {
+                eprintln!("[screencast] gnome-crop ok para ({x},{y})");
+                monitors.push(monitor);
+            }
+            Err(e) => eprintln!("[screencast] gnome-crop falló para ({x},{y}): {e}"),
+        }
+    }
+
+    let _ = session.close().await;
+    Ok((monitors, new_token))
+}
+
+/// Fallback: captura el escritorio completo con gdbus Screenshot() y recorta la región
+/// del monitor indicado. Usado cuando PipeWire no entrega frame para ese monitor.
+///
+/// `ScreenshotArea()` está prohibida para apps no-privilegiadas en GNOME moderno;
+/// `Screenshot()` (pantalla completa) sí está permitida, y recortamos en memoria.
+async fn capture_area_via_gnome_crop(x: i32, y: i32, width: u32, height: u32) -> Result<MonitorCapture, CaptureError> {
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let path = format!("/tmp/aurora-full-{ts}.png");
+
+    let output = tokio::process::Command::new("gdbus")
+        .args([
+            "call", "--session",
+            "--dest", "org.gnome.Shell.Screenshot",
+            "--object-path", "/org/gnome/Shell/Screenshot",
+            "--method", "org.gnome.Shell.Screenshot.Screenshot",
+            "false", "false", &path,
+        ])
+        .output()
+        .await
+        .map_err(|e| CaptureError::Capture(format!("gdbus no encontrado: {e}")))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(CaptureError::Capture(format!("gdbus Screenshot falló: {stderr}")));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if stdout.trim_start().starts_with("(false") {
+        return Err(CaptureError::Capture("Screenshot devolvió false".to_string()));
+    }
+
+    let data = std::fs::read(&path)
+        .map_err(|e| CaptureError::Capture(format!("No se pudo leer la captura: {e}")))?;
+    let _ = std::fs::remove_file(&path);
+
+    let img = image::load_from_memory(&data)
+        .map_err(|e| CaptureError::ImageProcessing(format!("Imagen inválida: {e}")))?;
+
+    // Recortar la región del monitor faltante del screenshot completo.
+    // crop_imm clampea automáticamente al borde de la imagen.
+    let cropped = img.crop_imm(x as u32, y as u32, width, height);
+    let actual_w = cropped.width();
+    let actual_h = cropped.height();
+
+    let rgb = cropped.to_rgb8();
+    let mut buf = std::io::Cursor::new(Vec::new());
+    JpegEncoder::new_with_quality(&mut buf, 95)
+        .encode_image(&DynamicImage::ImageRgb8(rgb))
+        .map_err(|e| CaptureError::ImageProcessing(format!("JPEG encode error: {e}")))?;
+
+    Ok(MonitorCapture {
+        x,
+        y,
+        width: actual_w,
+        height: actual_h,
+        data: STANDARD.encode(buf.into_inner()),
+    })
+}
+
+/// Construye el pod SPA para negociación de formato video/raw.
+fn make_video_format_pod() -> Vec<u8> {
+    use pipewire::spa::{
+        param::{
+            format::{FormatProperties, MediaSubtype, MediaType},
+            video::VideoFormat,
+            ParamType,
+        },
+        pod::{serialize::PodSerializer, Object, Property, PropertyFlags, Value},
+        pod::ChoiceValue,
+        utils::{Choice, ChoiceEnum, ChoiceFlags, Fraction, Id, Rectangle, SpaTypes},
+    };
+
+    PodSerializer::serialize(
+        std::io::Cursor::new(Vec::new()),
+        &Value::Object(Object {
+            type_: SpaTypes::ObjectParamFormat.as_raw(),
+            id: ParamType::EnumFormat.as_raw(),
+            properties: vec![
+                Property {
+                    key: FormatProperties::MediaType.as_raw(),
+                    flags: PropertyFlags::empty(),
+                    value: Value::Id(Id(MediaType::Video.as_raw())),
+                },
+                Property {
+                    key: FormatProperties::MediaSubtype.as_raw(),
+                    flags: PropertyFlags::empty(),
+                    value: Value::Id(Id(MediaSubtype::Raw.as_raw())),
+                },
+                Property {
+                    key: FormatProperties::VideoFormat.as_raw(),
+                    flags: PropertyFlags::empty(),
+                    value: Value::Choice(ChoiceValue::Id(Choice(
+                        ChoiceFlags::empty(),
+                        ChoiceEnum::Enum {
+                            default: Id(VideoFormat::BGRA.as_raw()),
+                            alternatives: vec![
+                                Id(VideoFormat::BGRx.as_raw()),
+                                Id(VideoFormat::RGBA.as_raw()),
+                                Id(VideoFormat::RGBx.as_raw()),
+                            ],
+                        },
+                    ))),
+                },
+                Property {
+                    key: FormatProperties::VideoSize.as_raw(),
+                    flags: PropertyFlags::empty(),
+                    value: Value::Choice(ChoiceValue::Rectangle(Choice(
+                        ChoiceFlags::empty(),
+                        ChoiceEnum::Range {
+                            default: Rectangle { width: 1920, height: 1080 },
+                            min: Rectangle { width: 1, height: 1 },
+                            max: Rectangle { width: 16384, height: 16384 },
+                        },
+                    ))),
+                },
+                Property {
+                    key: FormatProperties::VideoFramerate.as_raw(),
+                    flags: PropertyFlags::empty(),
+                    value: Value::Choice(ChoiceValue::Fraction(Choice(
+                        ChoiceFlags::empty(),
+                        ChoiceEnum::Range {
+                            default: Fraction { num: 25, denom: 1 },
+                            min: Fraction { num: 0, denom: 1 },
+                            max: Fraction { num: 1000, denom: 1 },
+                        },
+                    ))),
+                },
+            ],
+        }),
+    )
+    .expect("Failed to serialize video format pod")
+    .0
+    .into_inner()
+}
+
+#[derive(Default)]
+struct StreamCaptureState {
+    format: Option<pipewire::spa::param::video::VideoFormat>,
+    width: u32,
+    height: u32,
+}
+
+/// Captura un frame por cada stream usando el PipeWire remote fd del portal.
+/// `streams` es Vec<(node_id, x, y)> con las coordenadas de cada monitor.
+/// Retorna (monitores_capturados, no_capturados:(x,y,w,h)).
+/// Los "no capturados" son streams que negociaron formato pero no entregaron frame;
+/// el caller puede usar un fallback (ej. gdbus ScreenshotArea) para completarlos.
+/// Función síncrona — debe ejecutarse en spawn_blocking.
+fn pipewire_capture_frames(
+    fd: std::os::fd::OwnedFd,
+    streams: Vec<(u32, i32, i32)>,
+) -> Result<(Vec<MonitorCapture>, Vec<(i32, i32, u32, u32)>), String> {
+    use pipewire::{
+        context::Context,
+        main_loop::MainLoop,
+        spa::{
+            param::{
+                format::{MediaSubtype, MediaType},
+                format_utils::parse_format,
+                video::VideoInfoRaw,
+                ParamType,
+            },
+            pod::Pod,
+            utils::Direction,
+        },
+        stream::StreamFlags,
+    };
+
+    pipewire::init();
+
+    let mainloop = MainLoop::new(None).map_err(|e| e.to_string())?;
+    let context = Context::new(&mainloop).map_err(|e| e.to_string())?;
+    let core = context.connect_fd(fd, None).map_err(|e| e.to_string())?;
+
+    // Guardar frames crudos en el callback (NO hacer encoding ahí — bloquea el event loop).
+    // El encoding se hace después de mainloop.run().
+    //
+    // Usamos HashMap<node_id, RawFrame> en lugar de Vec + contador:
+    // garantiza exactamente UN frame por node, aunque el mismo stream dispare
+    // múltiples callbacks antes de que los demás streams envíen su primer frame.
+    struct RawFrame {
+        data: Vec<u8>,
+        width: u32,
+        height: u32,
+        format: pipewire::spa::param::video::VideoFormat,
+        x: i32,
+        y: i32,
+    }
+
+    let needed = streams.len();
+    let raw_frames: Arc<Mutex<std::collections::HashMap<u32, RawFrame>>> =
+        Arc::new(Mutex::new(std::collections::HashMap::new()));
+    // Registra el tamaño negociado por formato para cada stream.
+    // Si el stream negocia formato pero no entrega frame (timeout), lo usamos
+    // para el fallback gdbus ScreenshotArea.
+    let stream_sizes: Arc<Mutex<std::collections::HashMap<u32, (u32, u32)>>> =
+        Arc::new(Mutex::new(std::collections::HashMap::new()));
+
+    let format_pod_bytes = make_video_format_pod();
+
+    // Guardamos streams y listeners para que no sean dropeados antes de mainloop.run()
+    let mut _alive: Vec<Box<dyn std::any::Any>> = Vec::new();
+
+    for (node_id, stream_x, stream_y) in streams.iter().copied() {
+        let state: Arc<Mutex<StreamCaptureState>> =
+            Arc::new(Mutex::new(StreamCaptureState::default()));
+        let state_param = Arc::clone(&state);
+        let state_proc = Arc::clone(&state);
+        let frames_clone = Arc::clone(&raw_frames);
+        let sizes_clone = Arc::clone(&stream_sizes);
+        let mainloop_clone = mainloop.clone();
+
+        let mut props = pipewire::properties::Properties::new();
+        props.insert("media.type", "Video");
+        props.insert("media.category", "Capture");
+        props.insert("media.role", "Screen");
+
+        let stream = pipewire::stream::Stream::new(&core, "aurora-screenshot", props)
+            .map_err(|e| e.to_string())?;
+
+        let listener = stream
+            .add_local_listener_with_user_data(())
+            .state_changed(move |stream, _data, old, new| {
+                use pipewire::stream::StreamState;
+                eprintln!("[pw] node={node_id} state: {old:?} → {new:?}");
+                // trigger_process() solicita el primer frame. Debe llamarse cuando el
+                // stream ya está en STREAMING — si se llama antes (ej. en param_changed
+                // justo tras set_active(true)), la transición es asíncrona y el request
+                // llega antes de que el stream esté listo, resultando en frames perdidos.
+                if new == StreamState::Streaming {
+                    eprintln!("[pw] node={node_id} STREAMING → trigger_process()");
+                    let _ = stream.trigger_process();
+                }
+            })
+            .param_changed(move |stream, _data, id, pod| {
+                if id != ParamType::Format.as_raw() {
+                    return;
+                }
+                let Some(pod) = pod else { return };
+                if let Ok((mt, mst)) = parse_format(pod) {
+                    if mt == MediaType::Video && mst == MediaSubtype::Raw {
+                        let mut info = VideoInfoRaw::default();
+                        if info.parse(pod).is_ok() {
+                            let mut s = state_param.lock().unwrap();
+                            s.format = Some(info.format());
+                            s.width = info.size().width;
+                            s.height = info.size().height;
+                            eprintln!(
+                                "[pw] node={node_id} format: {:?} {}x{}",
+                                info.format(),
+                                info.size().width,
+                                info.size().height
+                            );
+                            sizes_clone.lock().unwrap().insert(node_id, (info.size().width, info.size().height));
+                        }
+                        // set_active(true) inicia la transición PAUSED → STREAMING.
+                        // El trigger_process() real va en state_changed cuando llega a STREAMING.
+                        let _ = stream.set_active(true);
+                    }
+                }
+            })
+            .process(move |stream, _| {
+                eprintln!("[pw] process node={node_id}");
+
+                // Si ya tenemos frame para este node, desencolar y descartar el buffer
+                // para que PipeWire no siga re-disparando el callback con el mismo buffer
+                // no drenado — que era la causa del spam de 50+ callbacks.
+                // NO llamamos set_active(false): modificar el grafo PipeWire mientras otros
+                // streams están esperando su primer frame cancela sus triggers pendientes.
+                {
+                    let frames = frames_clone.lock().unwrap();
+                    if frames.contains_key(&node_id) {
+                        let _ = stream.dequeue_buffer(); // descartar — drop automático
+                        return;
+                    }
+                }
+
+                let (fmt, width, height) = {
+                    let s = state_proc.lock().unwrap();
+                    let Some(fmt) = s.format else { return };
+                    if s.width == 0 || s.height == 0 { return; }
+                    (fmt, s.width, s.height)
+                };
+
+                let Some(mut buffer) = stream.dequeue_buffer() else { return };
+                let datas = buffer.datas_mut();
+                let Some(d) = datas.first_mut() else { return };
+                let offset = d.chunk().offset() as usize;
+                let size = d.chunk().size() as usize;
+                let Some(slice) = d.data() else { return };
+                if size == 0 || slice.len() < offset + size { return; }
+
+                // Copiar los bytes ANTES de adquirir el lock: el copy de ~8MB
+                // bloquea el event loop de PipeWire si se hace dentro del lock,
+                // retrasando los callbacks de los otros streams.
+                let frame_bytes = slice[offset..offset + size].to_vec();
+
+                let mut frames = frames_clone.lock().unwrap();
+                frames.insert(node_id, RawFrame {
+                    data: frame_bytes,
+                    width,
+                    height,
+                    format: fmt,
+                    x: stream_x,
+                    y: stream_y,
+                });
+                let count = frames.len();
+                eprintln!("[pw] node={node_id} frame captured ({count}/{needed})");
+                if count >= needed {
+                    mainloop_clone.quit();
+                }
+            })
+            .register()
+            .map_err(|e| e.to_string())?;
+
+        let pod = unsafe { Pod::from_bytes(&format_pod_bytes) }
+            .ok_or("Invalid format pod")?;
+
+        stream
+            .connect(
+                Direction::Input,
+                Some(node_id),
+                StreamFlags::AUTOCONNECT | StreamFlags::MAP_BUFFERS,
+                &mut [pod],
+            )
+            .map_err(|e| e.to_string())?;
+
+        _alive.push(Box::new((stream, listener)));
+    }
+
+    // Timeout de 10 segundos via el timer del event loop PipeWire
+    let ml_timeout = mainloop.clone();
+    let timer = mainloop.loop_().add_timer(move |_| {
+        eprintln!("[pw] capture timeout — quitting");
+        ml_timeout.quit();
+    });
+    let _ = timer.update_timer(Some(std::time::Duration::from_secs(2)), None);
+
+    mainloop.run();
+
+    // El event loop terminó. Ahora hacemos el encoding JPEG fuera del callback.
+    let frames_map = raw_frames.lock().unwrap();
+    if frames_map.is_empty() {
+        return Err("No se recibieron frames de PipeWire (timeout o error)".to_string());
+    }
+
+    // Ordenar por node_id para output determinista
+    let mut frames: Vec<(u32, &RawFrame)> = frames_map.iter().map(|(k, v)| (*k, v)).collect();
+    frames.sort_by_key(|(id, _)| *id);
+
+    let mut monitors = Vec::with_capacity(frames.len());
+    for (node_id, frame) in &frames {
+        eprintln!("[pw] encoding node={node_id} ({}x{}) at ({},{})", frame.width, frame.height, frame.x, frame.y);
+        match raw_pixels_to_monitor_capture(frame.data.clone(), frame.width, frame.height, frame.format, frame.x, frame.y) {
+            Ok(monitor) => monitors.push(monitor),
+            Err(e) => eprintln!("[pw] encode error for node {node_id}: {e}"),
+        }
+    }
+
+    if monitors.is_empty() {
+        return Err("Fallo al encodear frames de PipeWire".to_string());
+    }
+
+    eprintln!("[pw] done: {} monitor(s) encoded", monitors.len());
+
+    // Construir lista de streams que negociaron formato pero no entregaron frame.
+    let sizes_map = stream_sizes.lock().unwrap();
+    let uncaptured: Vec<(i32, i32, u32, u32)> = streams
+        .iter()
+        .filter(|(node_id, _, _)| !frames_map.contains_key(node_id))
+        .filter_map(|(node_id, x, y)| {
+            sizes_map.get(node_id).map(|&(w, h)| (*x, *y, w, h))
+        })
+        .collect();
+    for (x, y, w, h) in &uncaptured {
+        eprintln!("[pw] uncaptured stream at ({x},{y}) {w}x{h} — needs fallback");
+    }
+
+    Ok((monitors, uncaptured))
+}
+
+/// Convierte píxeles crudos del frame PipeWire a MonitorCapture (JPEG base64).
+fn raw_pixels_to_monitor_capture(
+    data: Vec<u8>,
+    width: u32,
+    height: u32,
+    format: pipewire::spa::param::video::VideoFormat,
+    x: i32,
+    y: i32,
+) -> Result<MonitorCapture, String> {
+    use image::{ImageBuffer, Rgb, Rgba};
+    use pipewire::spa::param::video::VideoFormat;
+
+    let img: DynamicImage = match format {
+        VideoFormat::RGBA => ImageBuffer::<Rgba<u8>, Vec<u8>>::from_raw(width, height, data)
+            .map(DynamicImage::ImageRgba8)
+            .ok_or("Buffer RGBA inválido")?,
+
+        VideoFormat::RGBx => {
+            let rgba: Vec<u8> = data.chunks_exact(4).flat_map(|c| [c[0], c[1], c[2], 255]).collect();
+            ImageBuffer::<Rgba<u8>, Vec<u8>>::from_raw(width, height, rgba)
+                .map(DynamicImage::ImageRgba8)
+                .ok_or("Buffer RGBx inválido")?
+        }
+
+        VideoFormat::BGRA => {
+            let rgba: Vec<u8> = data.chunks_exact(4).flat_map(|c| [c[2], c[1], c[0], c[3]]).collect();
+            ImageBuffer::<Rgba<u8>, Vec<u8>>::from_raw(width, height, rgba)
+                .map(DynamicImage::ImageRgba8)
+                .ok_or("Buffer BGRA inválido")?
+        }
+
+        VideoFormat::BGRx => {
+            let rgba: Vec<u8> = data.chunks_exact(4).flat_map(|c| [c[2], c[1], c[0], 255]).collect();
+            ImageBuffer::<Rgba<u8>, Vec<u8>>::from_raw(width, height, rgba)
+                .map(DynamicImage::ImageRgba8)
+                .ok_or("Buffer BGRx inválido")?
+        }
+
+        VideoFormat::RGB => ImageBuffer::<Rgb<u8>, Vec<u8>>::from_raw(width, height, data)
+            .map(DynamicImage::ImageRgb8)
+            .ok_or("Buffer RGB inválido")?,
+
+        other => return Err(format!("Formato de video no soportado: {other:?}")),
+    };
+
+    let rgb = img.to_rgb8();
+    let mut buf = Cursor::new(Vec::new());
+    JpegEncoder::new_with_quality(&mut buf, 95)
+        .encode_image(&DynamicImage::ImageRgb8(rgb))
+        .map_err(|e| e.to_string())?;
+
+    Ok(MonitorCapture {
+        x,
+        y,
+        width,
+        height,
+        data: STANDARD.encode(buf.into_inner()),
+    })
 }

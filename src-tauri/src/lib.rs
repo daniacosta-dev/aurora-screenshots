@@ -84,6 +84,7 @@ pub fn run() {
             commands::finalize_area_capture,
             commands::copy_history_item,
             commands::get_desktop_background,
+            commands::reset_screencast_token,
             commands::finalize_annotated_capture,
             commands::hide_capture_overlay,
             commands::close_capture_overlay,
@@ -100,6 +101,7 @@ pub fn run() {
             commands::set_autostart,
             commands::overlay_ready,
             commands::get_wayland_pending_capture,
+            commands::get_monitor_background,
         ])
         .build(tauri::generate_context!())
         .expect("error while running tauri application")
@@ -135,10 +137,20 @@ fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let capture_item = MenuItem::with_id(app, "capture", "New capture", true, None::<&str>)?;
     let history_item =
         MenuItem::with_id(app, "history", "Open history", true, None::<&str>)?;
+    let reset_monitors_item = MenuItem::with_id(
+        app,
+        "reset_monitors",
+        "Reset monitor selection (Wayland)",
+        true,
+        None::<&str>,
+    )?;
     let separator = PredefinedMenuItem::separator(app)?;
     let quit_item = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
 
-    let menu = Menu::with_items(app, &[&capture_item, &history_item, &separator, &quit_item])?;
+    let menu = Menu::with_items(
+        app,
+        &[&capture_item, &history_item, &reset_monitors_item, &separator, &quit_item],
+    )?;
 
     // Ícono embebido en el binario — funciona independientemente de cómo se instale la app
     let icon = load_svg_icon(TRAY_ICON_SVG, 64)
@@ -152,6 +164,12 @@ fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         .on_menu_event(|app, event| match event.id.as_ref() {
             "capture" => commands::show_capture_overlay(app, true),
             "history" => show_history_window(app),
+            "reset_monitors" => {
+                if let Ok(db) = app.state::<AppState>().db.lock() {
+                    let _ = db::delete_setting(&db, "screencast_restore_token");
+                    eprintln!("[tray] screencast_restore_token borrado — próxima captura mostrará el diálogo");
+                }
+            }
             "quit" => app.exit(0),
             _ => {}
         })
@@ -231,6 +249,12 @@ fn register_shortcut(app: &tauri::App, shortcut_str: &str) -> Result<(), Box<dyn
 }
 
 pub(crate) fn show_history_window(app: &tauri::AppHandle) {
+    // En Wayland set_position() es ignorado por el compositor.
+    // Usamos una ventana fullscreen transparente y posicionamos el panel
+    // en top-right via CSS — es el único enfoque que funciona sin layer-shell.
+    //
+    // El window se crea una vez y se reusa. fullscreen(true) en el builder
+    // garantiza que esté fullscreen antes del primer show().
     let window = match app.get_webview_window("main") {
         Some(w) => w,
         None => {
@@ -239,12 +263,13 @@ pub(crate) fn show_history_window(app: &tauri::AppHandle) {
                 "main",
                 tauri::WebviewUrl::App("index.html".into()),
             )
-            .title("Aurora Screenshots")
-            .inner_size(420.0, 650.0)
-            .visible(false)
-            .skip_taskbar(true)
-            .resizable(false)
+            .transparent(true)
             .decorations(false)
+            .fullscreen(true)
+            .always_on_top(true)
+            .skip_taskbar(true)
+            .visible(false)
+            .resizable(false)
             .build()
             {
                 Ok(w) => w,
@@ -256,28 +281,9 @@ pub(crate) fn show_history_window(app: &tauri::AppHandle) {
         }
     };
 
-    position_main_window(&window);
     let _ = window.set_always_on_top(true);
     let _ = window.show();
     let _ = window.set_focus();
     let _ = window.set_always_on_top(false);
 }
 
-/// Posiciona la ventana principal en la esquina superior derecha del monitor primario.
-/// Usa la posición física del monitor para soportar configuraciones multi-monitor.
-fn position_main_window(window: &tauri::WebviewWindow) {
-    if let Ok(Some(monitor)) = window.primary_monitor() {
-        let pos = monitor.position();
-        let size = monitor.size();
-        let scale = monitor.scale_factor();
-        // Convertir posición y dimensiones físicas → lógicas
-        let mon_x = pos.x as f64 / scale;
-        let mon_y = pos.y as f64 / scale;
-        let mon_w = size.width as f64 / scale;
-        let win_w = 420.0f64;
-        let margin = 16.0f64;
-        let x = mon_x + mon_w - win_w - margin;
-        let y = mon_y + margin;
-        let _ = window.set_position(tauri::Position::Logical(tauri::LogicalPosition::new(x, y)));
-    }
-}

@@ -3,6 +3,11 @@ use base64::Engine as _;
 use tauri::{Emitter, Manager, State};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 
+#[cfg(target_os = "linux")]
+use gtk::prelude::{GtkWindowExt, WidgetExt};
+#[cfg(target_os = "linux")]
+use gdk::prelude::MonitorExt;
+
 use crate::capture;
 use crate::clipboard;
 use crate::db::{self, HistoryEntry};
@@ -196,68 +201,232 @@ pub(crate) fn show_capture_overlay(app: &tauri::AppHandle, from_tray: bool) {
             }
 
             capture::DisplayServer::Wayland => {
-                // El portal XDG maneja la selección interactiva de región.
-                // Después de capturar, abrimos el overlay de anotación con la imagen.
-                eprintln!("[show_overlay wayland] calling portal (interactive)...");
-                match capture::capture_area_wayland_interactive().await {
-                    Ok(result) => {
-                        let img_w = result.width;
-                        let img_h = result.height;
-                        eprintln!("[show_overlay wayland] portal OK: {img_w}x{img_h}");
+                eprintln!("[show_overlay wayland] capturing full screen...");
 
-                        {
+                if from_tray {
+                    tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+                }
+
+                // Cargar restore token de la DB (permite captura silenciosa después
+                // del primer consentimiento).
+                let restore_token = {
+                    let state = app.state::<AppState>();
+                    state.db.lock().ok()
+                        .and_then(|db| db::get_setting(&db, "screencast_restore_token").ok())
+                        .flatten()
+                };
+                eprintln!("[show_overlay wayland] restore_token={:?}", restore_token.is_some());
+
+                // Intento 1: PipeWire ScreenCast (sin UI con restore token, con UI la primera vez)
+                let monitors = match capture::capture_via_screencast(restore_token).await {
+                    Ok((monitors, new_token)) => {
+                        // Persistir el nuevo token para la próxima captura
+                        if let Some(token) = new_token {
                             let state = app.state::<AppState>();
-                            if let Ok(mut pending) = state.wayland_pending_capture.lock() {
-                                *pending = Some(result);
+                            if let Ok(db) = state.db.lock() {
+                                let _ = db::set_setting(&db, "screencast_restore_token", &token);
+                                eprintln!("[show_overlay wayland] restore token saved");
                             };
                         }
-
-                        let overlay = match app.get_webview_window("capture-overlay") {
-                            Some(w) => w,
-                            None => {
-                                match tauri::WebviewWindowBuilder::new(
-                                    &app,
-                                    "capture-overlay",
-                                    tauri::WebviewUrl::App("index.html".into()),
-                                )
-                                .transparent(false)
-                                .decorations(false)
-                                .always_on_top(true)
-                                .skip_taskbar(true)
-                                .visible(false)
-                                .resizable(true)
-                                .inner_size(800.0, 600.0)
-                                .build() {
-                                    Ok(w) => {
-                                        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-                                        w
-                                    }
-                                    Err(e) => {
-                                        eprintln!("[show_overlay wayland] failed to create overlay: {e}");
-                                        return;
-                                    }
-                                }
-                            }
-                        };
-
-                        // Fullscreen antes de show() para que el compositor asigne las
-                        // dimensiones correctas desde el primer map — sin flash de tamaño intermedio.
-                        let _ = overlay.set_fullscreen(true);
-                        let _ = overlay.show();
-                        let _ = overlay.set_focus();
-
-                        // Esperar a que el compositor mapee la ventana y React monte.
-                        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
-                        eprintln!("[show_overlay wayland] emitting wayland-capture-ready");
-                        let _ = overlay.emit("wayland-capture-ready", ());
+                        monitors
                     }
                     Err(e) => {
-                        eprintln!("[show_overlay wayland] capture FAILED: {e}");
+                        eprintln!("[show_overlay wayland] screencast failed ({e}), trying fallbacks...");
+                        match capture::capture_monitors_wayland().await {
+                            Ok(m) => m,
+                            Err(e2) => {
+                                eprintln!("[show_overlay wayland] all capture methods failed: {e2}");
+                                return;
+                            }
+                        }
                     }
+                };
+
+                for m in &monitors {
+                    eprintln!("[show_overlay wayland] monitor: pos=({},{}) size={}x{}", m.x, m.y, m.width, m.height);
+                }
+
+                // Guardar monitors en AppState para que get_monitor_background los sirva.
+                {
+                    let state = app.state::<AppState>();
+                    if let Ok(mut bg) = state.desktop_background.lock() {
+                        *bg = Some(monitors.clone());
+                    };
+                    if let Ok(mut offset) = state.overlay_offset.lock() {
+                        *offset = (0, 0);
+                    };
+                }
+
+                // Cerrar ventanas viejas de overlay que ya no corresponden a monitores actuales.
+                for label in app.webview_windows().keys().cloned().collect::<Vec<_>>() {
+                    if label.starts_with("capture-overlay-") {
+                        if let Some(w) = app.get_webview_window(&label) {
+                            let _ = w.close();
+                        }
+                    }
+                }
+                // Breve pausa para que GTK cierre las ventanas antes de crear las nuevas.
+                tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+
+                // Crear UNA ventana fullscreen por monitor y posicionarla con GTK.
+                //
+                // Estrategia: construir la ventana OCULTA, luego desde el main thread de GTK:
+                //   1. Encontrar el índice GDK del monitor por coordenadas.
+                //   2. Llamar GdkWindow::fullscreen_on_monitor(idx) — configura el estado
+                //      inicial antes del primer mapeo.
+                //   3. Llamar show() — el compositor recibe la ventana directamente como
+                //      "fullscreen on output X" sin transición de estado.
+                //
+                // Esto es más confiable que mostrar-primero-luego-mover porque el compositor
+                // ve la ventana como fullscreen desde su primer commit de superficie.
+                for (i, monitor) in monitors.iter().enumerate() {
+                    let label = format!("capture-overlay-{i}");
+                    let mon_x = monitor.x;
+                    let mon_y = monitor.y;
+                    let win = match tauri::WebviewWindowBuilder::new(
+                        &app,
+                        &label,
+                        tauri::WebviewUrl::App("index.html".into()),
+                    )
+                    .transparent(true)
+                    .decorations(false)
+                    .always_on_top(true)
+                    .skip_taskbar(true)
+                    .visible(false)  // OCULTA: el compositor no la mapea todavía
+                    .resizable(false)
+                    .inner_size(monitor.width as f64, monitor.height as f64)
+                    .build() {
+                        Ok(w) => w,
+                        Err(e) => {
+                            eprintln!("[show_overlay wayland] failed to create overlay-{i}: {e}");
+                            continue;
+                        }
+                    };
+
+                    // Breve pausa para que Tauri termine la inicialización del WebView
+                    // (realiza el GtkWindow internamente). Sin esto el gtk_window() call
+                    // podría fallar o devolver un estado incompleto.
+                    tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+
+                    // GTK/GDK SOLO pueden llamarse desde el hilo principal (GTK main loop).
+                    // Usamos gtk_window() directamente para show_all() — evita cualquier
+                    // indirección asíncrona de Tauri (idle_add etc.) y garantiza que
+                    // fullscreen + show ocurran en el mismo tick del GTK main loop.
+                    #[cfg(target_os = "linux")]
+                    {
+                        let win_clone = win.clone();
+                        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+                        if let Err(e) = app.run_on_main_thread(move || {
+                            match win_clone.gtk_window() {
+                                Ok(gtk_win) => {
+                                    // 1ª llamada: pre-mapeo — establece initial_fullscreen_monitor
+                                    //   en GtkWindow antes de que la ventana sea realizada.
+                                    fullscreen_on_gtk_window(&gtk_win, mon_x, mon_y);
+                                    // Mostrar la ventana — GTK la realiza y mapea aquí.
+                                    gtk_win.show_all();
+                                    eprintln!("[show_overlay wayland] show_all() for overlay-{i}");
+
+                                    // No usar post-map unfullscreen+fullscreen: causa animación
+                                    // visible y mueve la ventana del monitor correcto al
+                                    // incorrecto. El initial fullscreen_on_monitor + show_all()
+                                    // en el mismo tick ya funciona correctamente.
+                                }
+                                Err(e) => eprintln!("[show_overlay wayland] gtk_window() error: {e}"),
+                            }
+                            let _ = tx.send(());
+                        }) {
+                            eprintln!("[show_overlay wayland] run_on_main_thread error: {e}");
+                        } else {
+                            let _ = rx.await;
+                        }
+                    }
+
+                    // Breve pausa para que el compositor procese el move antes de que el
+                    // frontend empiece a dibujar el fondo (evita que el canvas se inicialice
+                    // con las dimensiones del monitor equivocado).
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+                    eprintln!("[show_overlay wayland] overlay-{i} created for monitor at ({mon_x},{mon_y}) {}x{}", monitor.width, monitor.height);
+                    let _ = win.emit("background-ready", ());
                 }
             }
         }
     });
+}
+
+/// Devuelve el índice GDK del monitor cuyas coordenadas coincidan con (target_x, target_y).
+/// Retorna -1 si no se encuentra (el caller debería usar fullscreen() genérico).
+#[cfg(target_os = "linux")]
+fn find_gdk_monitor_idx(target_x: i32, target_y: i32) -> i32 {
+    let display = match gdk::Display::default() {
+        Some(d) => d,
+        None => return -1,
+    };
+    for i in 0..display.n_monitors() {
+        if let Some(monitor) = display.monitor(i) {
+            let geo = monitor.geometry();
+            let scale = monitor.scale_factor();
+            if geo.x() == target_x && geo.y() == target_y { return i; }
+            if geo.x() * scale == target_x && geo.y() * scale == target_y { return i; }
+        }
+    }
+    -1
+}
+
+/// Pone un GtkWindow en fullscreen sobre el monitor cuyas coordenadas GDK coincidan con
+/// (target_x, target_y). Debe llamarse desde el GTK main thread.
+/// Toma gtk::ApplicationWindow directamente — sin pasar por Tauri — para usarse
+/// en el mismo tick de run_on_main_thread junto con show_all().
+#[cfg(target_os = "linux")]
+fn fullscreen_on_gtk_window(gtk_win: &gtk::ApplicationWindow, target_x: i32, target_y: i32) {
+    let display = match gdk::Display::default() {
+        Some(d) => d,
+        None => { eprintln!("[fullscreen_on_monitor] no default GDK display"); return; }
+    };
+
+    let n = display.n_monitors();
+    eprintln!("[fullscreen_on_monitor] target=({target_x},{target_y}), GDK n_monitors={n}");
+
+    let mut found_idx: Option<i32> = None;
+    for i in 0..n {
+        if let Some(monitor) = display.monitor(i) {
+            let geo = monitor.geometry();
+            let scale = monitor.scale_factor();
+            eprintln!("[fullscreen_on_monitor] GDK[{i}]: pos=({},{}) size={}x{} scale={scale}", geo.x(), geo.y(), geo.width(), geo.height());
+            if geo.x() == target_x && geo.y() == target_y {
+                found_idx = Some(i);
+                break;
+            }
+            if geo.x() * scale == target_x && geo.y() * scale == target_y {
+                found_idx = Some(i);
+                break;
+            }
+        }
+    }
+
+    match found_idx {
+        Some(idx) => {
+            eprintln!("[fullscreen_on_monitor] matched GDK[{idx}]");
+            if let Some(gdk_win) = WidgetExt::window(gtk_win) {
+                // GdkWindow ya existe (ventana realizada) — llamada directa al backend Wayland.
+                eprintln!("[fullscreen_on_monitor] GdkWindow realized → gdk_win.fullscreen_on_monitor({idx})");
+                gdk_win.fullscreen_on_monitor(idx);
+            } else {
+                // GdkWindow aún no existe (ventana no realizada). Seteamos el estado inicial
+                // en GtkWindow: cuando se realice/mapee, aplicará fullscreen en monitor {idx}.
+                eprintln!("[fullscreen_on_monitor] GdkWindow not yet → gtk_win.fullscreen_on_monitor(screen, {idx})");
+                let screen = match WidgetExt::screen(gtk_win) {
+                    Some(s) => s,
+                    None => { eprintln!("[fullscreen_on_monitor] no screen"); return; }
+                };
+                gtk_win.fullscreen_on_monitor(&screen, idx);
+            }
+        }
+        None => {
+            eprintln!("[fullscreen_on_monitor] no match for ({target_x},{target_y}) — fallback fullscreen()");
+            gtk_win.fullscreen();
+        }
+    }
 }
 
 /// El frontend llama a este comando cuando ha terminado de renderizar el fondo en canvas.
@@ -265,14 +434,8 @@ pub(crate) fn show_capture_overlay(app: &tauri::AppHandle, from_tray: bool) {
 /// aparezca directamente con la imagen cargada, sin flash negro previo.
 /// Solo relevante en X11; en Wayland el overlay ya está visible antes de este llamado.
 #[tauri::command]
-pub async fn overlay_ready(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<(), String> {
-    let overlay = match app.get_webview_window("capture-overlay") {
-        Some(w) => w,
-        None => {
-            eprintln!("[overlay_ready] no overlay window");
-            return Ok(());
-        }
-    };
+pub async fn overlay_ready(window: tauri::WebviewWindow, state: State<'_, AppState>) -> Result<(), String> {
+    let overlay = window;
 
     eprintln!("[overlay_ready] showing overlay");
     let _ = overlay.show();
@@ -281,6 +444,14 @@ pub async fn overlay_ready(app: tauri::AppHandle, state: State<'_, AppState>) ->
 
     let _ = overlay.set_focus();
     let _ = overlay.set_ignore_cursor_events(false);
+
+    // En Wayland no hay grab de input — emitir grab-ready directamente para que
+    // el frontend re-solicite foco a WebKit.
+    #[cfg(target_os = "linux")]
+    if state.display_server == capture::DisplayServer::Wayland {
+        let _ = overlay.emit("grab-ready", ());
+        return Ok(());
+    }
 
     // Input grab: solo en X11. En Wayland no hay XID ni grab_pointer/keyboard.
     #[cfg(target_os = "linux")]
@@ -447,14 +618,23 @@ pub fn copy_history_item(state: State<AppState>, id: i64) -> Result<(), String> 
 
 /// Oculta el overlay de captura desde el frontend (más confiable que la API JS en Tauri).
 #[tauri::command]
-pub fn hide_capture_overlay(state: State<AppState>, app: tauri::AppHandle) -> Result<(), String> {
+pub fn hide_capture_overlay(state: State<AppState>, app: tauri::AppHandle, window: tauri::WebviewWindow) -> Result<(), String> {
     #[cfg(target_os = "linux")]
     if state.display_server == capture::DisplayServer::X11 {
         if let Err(e) = crate::x11_grab::ungrab_input() {
             eprintln!("ungrab_input: {e}");
         }
     }
-    if let Some(overlay) = app.get_webview_window("capture-overlay") {
+    // En Wayland: ocultar todas las ventanas capture-overlay-*.
+    // En X11: ocultar solo "capture-overlay".
+    let label = window.label().to_string();
+    if label.starts_with("capture-overlay-") {
+        for (lbl, w) in app.webview_windows() {
+            if lbl.starts_with("capture-overlay-") {
+                let _ = w.hide();
+            }
+        }
+    } else if let Some(overlay) = app.get_webview_window("capture-overlay") {
         let _ = overlay.hide();
     }
     Ok(())
@@ -464,7 +644,7 @@ pub fn hide_capture_overlay(state: State<AppState>, app: tauri::AppHandle) -> Re
 /// Úsalo en ESC para que la próxima captura arranque con una ventana WebKit limpia,
 /// evitando el bug de "primer teclazo da foco, segundo ejecuta la acción".
 #[tauri::command]
-pub fn close_capture_overlay(state: State<AppState>, app: tauri::AppHandle) -> Result<(), String> {
+pub fn close_capture_overlay(state: State<AppState>, app: tauri::AppHandle, window: tauri::WebviewWindow) -> Result<(), String> {
     #[cfg(target_os = "linux")]
     if state.display_server == capture::DisplayServer::X11 {
         if let Err(e) = crate::x11_grab::ungrab_input() {
@@ -482,7 +662,16 @@ pub fn close_capture_overlay(state: State<AppState>, app: tauri::AppHandle) -> R
     if let Ok(mut pending) = state.wayland_pending_capture.lock() {
         *pending = None;
     }
-    if let Some(overlay) = app.get_webview_window("capture-overlay") {
+    // En Wayland: cerrar todas las ventanas capture-overlay-*.
+    // En X11: cerrar solo "capture-overlay".
+    let label = window.label().to_string();
+    if label.starts_with("capture-overlay-") {
+        for (lbl, w) in app.webview_windows() {
+            if lbl.starts_with("capture-overlay-") {
+                let _ = w.close();
+            }
+        }
+    } else if let Some(overlay) = app.get_webview_window("capture-overlay") {
         let _ = overlay.close();
     }
     Ok(())
@@ -597,6 +786,36 @@ pub fn get_desktop_background(state: State<AppState>) -> Result<Option<Vec<captu
     Ok(bg.take())
 }
 
+/// Retorna el background del monitor específico para una ventana "capture-overlay-N".
+/// A diferencia de get_desktop_background, NO consume el dato — permite que cada
+/// ventana de overlay solicite su propio monitor sin que interfieran entre sí.
+#[tauri::command]
+pub fn get_monitor_background(
+    state: State<AppState>,
+    window: tauri::WebviewWindow,
+) -> Result<Option<capture::MonitorCapture>, String> {
+    // Extraer índice del label "capture-overlay-N"
+    let label = window.label().to_string();
+    let idx: usize = label
+        .strip_prefix("capture-overlay-")
+        .and_then(|s| s.parse().ok())
+        .ok_or_else(|| format!("Label inválido para get_monitor_background: {label}"))?;
+
+    let bg = state.desktop_background.lock().map_err(|e| e.to_string())?;
+    Ok(bg.as_ref().and_then(|monitors| monitors.get(idx).cloned()))
+}
+
+/// Borra el restore token del ScreenCast portal de la DB.
+/// El próximo screenshot mostrará el diálogo de selección de monitores,
+/// permitiendo al usuario elegir qué monitores incluir.
+#[tauri::command]
+pub fn reset_screencast_token(state: State<AppState>) -> Result<(), String> {
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    db::delete_setting(&db, "screencast_restore_token").map_err(|e| e.to_string())?;
+    eprintln!("[reset_screencast_token] token borrado");
+    Ok(())
+}
+
 /// El frontend llama a este comando con el PNG anotado (base64) para guardarlo y
 /// copiarlo al portapapeles. No requiere coordenadas — el canvas ya tiene el recorte.
 #[tauri::command]
@@ -613,10 +832,17 @@ pub fn finalize_annotated_capture(
     }
 
     // Destruir el overlay después del export: la captura terminó, liberar memoria.
-    // El overlay se mantiene vivo (hide) solo después de ESC para retry inmediato.
+    // En Wayland hay múltiples ventanas capture-overlay-*; en X11 solo "capture-overlay".
     let app2 = app.clone();
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        // Cerrar Wayland per-monitor overlays
+        for (lbl, w) in app2.webview_windows() {
+            if lbl.starts_with("capture-overlay-") {
+                let _ = w.close();
+            }
+        }
+        // Cerrar X11 overlay (no-op si no existe)
         if let Some(overlay) = app2.get_webview_window("capture-overlay") {
             let _ = overlay.close();
         }

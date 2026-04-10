@@ -1,6 +1,7 @@
 [profile.dev]
 opt-level = 2          # optimiza el código intensivo (image encode, compositing) sin full release
 debug = true           # mantiene debug symbols para backtraces
+codegen-units = 1      # evita bug de LTO con hidden symbols (ub_checks) en Rust >= 1.82
 
 [package]
 name = "aurora-screenshots"
@@ -23,6 +24,9 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = ["tray-icon", "image-png"] }
+gtk = { version = "0.18", features = ["v3_24"] }
+gdk = "0.18"
+glib = "0.18"
 tauri-plugin-opener = "2"
 tauri-plugin-global-shortcut = "2"
 tauri-plugin-clipboard-manager = "2"
@@ -33,7 +37,7 @@ rusqlite = { version = "0.31", features = ["bundled"] }
 rayon = "1"
 screenshots = "0.8"
 ashpd = "0.10"
-image = "0.25"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 base64 = "0.22"
 thiserror = "1"
 arboard = "3"
@@ -41,4 +45,5 @@ tokio = { version = "1", features = ["time", "process"] }
 resvg = "0.44"
 x11rb = "0.13"
 raw-window-handle = "0.6"
+pipewire = { version = "0.8", features = ["v0_3_34"] }
 

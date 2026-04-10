@@ -681,10 +681,25 @@ function CaptureOverlay() {
     try {
       const t0 = performance.now();
       type MonitorCapture = { x: number; y: number; width: number; height: number; data: string };
-      const monitors = await invoke<MonitorCapture[] | null>("get_desktop_background");
-      console.log(`[timing] IPC: ${(performance.now() - t0).toFixed(1)}ms  monitors=${monitors?.length}`);
 
-      if (!monitors || monitors.length === 0) return;
+      // En ventanas Wayland per-monitor (capture-overlay-N): pedir solo el monitor propio.
+      // En X11 (capture-overlay): pedir todos los monitores y componerlos.
+      const windowLabel = getCurrentWindow().label;
+      const isPerMonitor = windowLabel.startsWith("capture-overlay-");
+
+      let monitors: MonitorCapture[];
+      if (isPerMonitor) {
+        const m = await invoke<MonitorCapture | null>("get_monitor_background");
+        console.log(`[timing] IPC: ${(performance.now() - t0).toFixed(1)}ms  monitor=${m ? `${m.width}x${m.height}` : "null"}`);
+        if (!m) return;
+        // Normalizar a (0,0) — la ventana es exactamente ese monitor.
+        monitors = [{ ...m, x: 0, y: 0 }];
+      } else {
+        const all = await invoke<MonitorCapture[] | null>("get_desktop_background");
+        console.log(`[timing] IPC: ${(performance.now() - t0).toFixed(1)}ms  monitors=${all?.length}`);
+        if (!all || all.length === 0) return;
+        monitors = all;
+      }
 
       const totalW = Math.max(...monitors.map(m => m.x + m.width));
       const totalH = Math.max(...monitors.map(m => m.y + m.height));
