@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useReducer, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { listen } from "@tauri-apps/api/event";
+import { listen, emit } from "@tauri-apps/api/event";
 import { save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { pictureDir, downloadDir } from "@tauri-apps/api/path";
 import {
@@ -1002,6 +1002,27 @@ function CaptureOverlay() {
       loadBackground();
     }).then((fn) => { unlistenBg = fn; });
 
+    // En Wayland con múltiples overlays (uno por monitor): cuando el usuario empieza
+    // a seleccionar en OTRA ventana, descartamos la selección actual para que solo
+    // haya una selección activa a la vez.
+    let unlistenLocked: (() => void) | null = null;
+    listen<string>("overlay-selection-started", (event) => {
+      if (event.payload !== getCurrentWindow().label) {
+        // Otra pantalla tomó el rol de selección — descartar la nuestra
+        if (phase.current === "drawing" || phase.current === "annotating") {
+          phase.current = "idle";
+          startPos.current = { x: 0, y: 0 };
+          endPos.current = { x: 0, y: 0 };
+          annotationsRef.current = [];
+          currentAnnRef.current = null;
+          setDisplayPhase("idle");
+          setAnnCount(0);
+          setActiveTool(null);
+          draw();
+        }
+      }
+    }).then((fn) => { unlistenLocked = fn; });
+
     // El grab X11 se establece ~80ms después del show(). Cuando termina, emite
     // "grab-ready" y re-solicitamos foco a WebKit para evitar el bug donde el
     // primer teclazo solo activa el foco y el segundo ejecuta la acción.
@@ -1081,6 +1102,7 @@ function CaptureOverlay() {
       if (unlistenBg) unlistenBg();
       if (unlistenGrab) unlistenGrab();
       if (unlistenWayland) unlistenWayland();
+      if (unlistenLocked) unlistenLocked();
     };
   }, [reset, draw, initCanvas, loadBackground, loadWaylandCapture, waitForFullscreen, signalReady, exportCapture, exportFullDesktop, pinCapture, hideOverlay, closeOverlay]);
 
@@ -1277,6 +1299,9 @@ function CaptureOverlay() {
     startPos.current = pos;
     endPos.current = pos;
     setDisplayPhase("drawing");
+    // Notificar a los demás overlays (Wayland multi-monitor) que esta ventana
+    // ya tiene una selección activa, para que se bloqueen.
+    void emit("overlay-selection-started", getCurrentWindow().label);
     draw();
   };
 

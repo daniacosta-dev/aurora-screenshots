@@ -246,6 +246,109 @@ async fn capture_via_grim() -> Result<Vec<MonitorCapture>, CaptureError> {
     image_bytes_to_monitor_captures(&data)
 }
 
+/// Captura el escritorio completo como bytes PNG crudos.
+/// Intenta GNOME Shell D-Bus primero (GNOME Wayland), luego `grim` (wlroots).
+/// No composita ni convierte — devuelve bytes para que el caller los divida por monitor.
+pub async fn capture_full_desktop_wayland_bytes() -> Result<Vec<u8>, CaptureError> {
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+
+    // Intento 1: GNOME Shell D-Bus
+    let path = format!("/tmp/aurora-desk-{ts}.png");
+    let out = tokio::process::Command::new("gdbus")
+        .args([
+            "call", "--session",
+            "--dest", "org.gnome.Shell.Screenshot",
+            "--object-path", "/org/gnome/Shell/Screenshot",
+            "--method", "org.gnome.Shell.Screenshot.Screenshot",
+            "false", "false", &path,
+        ])
+        .output()
+        .await;
+    if let Ok(o) = out {
+        if o.status.success() && !String::from_utf8_lossy(&o.stdout).trim_start().starts_with("(false") {
+            if let Ok(data) = std::fs::read(&path) {
+                let _ = std::fs::remove_file(&path);
+                eprintln!("[wayland_bytes] GNOME Shell D-Bus ok: {}x? ({} bytes)", "?", data.len());
+                return Ok(data);
+            }
+        }
+    }
+    let _ = std::fs::remove_file(&path);
+
+    // Intento 2: grim (wlroots: Hyprland, Sway, etc.)
+    let path2 = format!("/tmp/aurora-desk-{ts}b.png");
+    let out2 = tokio::process::Command::new("grim")
+        .arg(&path2)
+        .output()
+        .await;
+    if let Ok(o2) = out2 {
+        if o2.status.success() {
+            if let Ok(data) = std::fs::read(&path2) {
+                let _ = std::fs::remove_file(&path2);
+                eprintln!("[wayland_bytes] grim ok ({} bytes)", data.len());
+                return Ok(data);
+            }
+        } else {
+            eprintln!("[wayland_bytes] grim failed: {}", String::from_utf8_lossy(&o2.stderr));
+        }
+    }
+    let _ = std::fs::remove_file(&path2);
+
+    Err(CaptureError::Capture(
+        "No se pudo capturar el escritorio (gdbus y grim fallaron). \
+         Instalá grim o verificá permisos de GNOME Shell Screenshot.".to_string(),
+    ))
+}
+
+/// Divide una imagen del escritorio completo en un `Vec<MonitorCapture>` recortando
+/// la región de cada monitor. `monitors` usa coordenadas en píxeles físicos.
+pub fn split_image_by_monitors(
+    data: &[u8],
+    monitors: &[(i32, i32, u32, u32)],
+) -> Result<Vec<MonitorCapture>, CaptureError> {
+    let img = image::load_from_memory(data)
+        .map_err(|e| CaptureError::ImageProcessing(format!("Imagen inválida: {e}")))?;
+
+    let img_w = img.width();
+    let img_h = img.height();
+    eprintln!("[split] imagen completa: {img_w}x{img_h}, {} monitores", monitors.len());
+
+    let mut result = Vec::with_capacity(monitors.len());
+
+    for &(x, y, w, h) in monitors {
+        let cx = (x.max(0) as u32).min(img_w);
+        let cy = (y.max(0) as u32).min(img_h);
+        let cw = w.min(img_w.saturating_sub(cx));
+        let ch = h.min(img_h.saturating_sub(cy));
+
+        if cw == 0 || ch == 0 {
+            eprintln!("[split] monitor ({x},{y}) {w}x{h} fuera de imagen — skip");
+            continue;
+        }
+
+        let cropped = img.crop_imm(cx, cy, cw, ch);
+        let rgb = cropped.to_rgb8();
+        let mut buf = std::io::Cursor::new(Vec::new());
+        JpegEncoder::new_with_quality(&mut buf, 95)
+            .encode_image(&DynamicImage::ImageRgb8(rgb))
+            .map_err(|e| CaptureError::ImageProcessing(format!("JPEG encode: {e}")))?;
+
+        eprintln!("[split] monitor ({x},{y}) {cw}x{ch} ok");
+        result.push(MonitorCapture { x, y, width: cw, height: ch, data: STANDARD.encode(buf.into_inner()) });
+    }
+
+    if result.is_empty() {
+        return Err(CaptureError::Capture(
+            "Ningún monitor quedó dentro de la imagen capturada".to_string(),
+        ));
+    }
+
+    Ok(result)
+}
+
 /// Convierte bytes PNG/imagen en Vec<MonitorCapture> (un solo monitor, posición 0,0).
 fn image_bytes_to_monitor_captures(data: &[u8]) -> Result<Vec<MonitorCapture>, CaptureError> {
     let img = image::load_from_memory(data)
@@ -355,9 +458,48 @@ fn process_image(img: DynamicImage, width: u32, height: u32) -> Result<CaptureRe
 /// La primera vez muestra el diálogo de selección de GNOME; después usa el
 /// restore_token para saltar ese paso y capturar silenciosamente.
 /// Retorna (monitores, nuevo_token) — el token debe persistirse en la DB.
+///
+/// Si el restore_token era stale (algún stream no entregó frames, lo cual suele
+/// ocurrir cuando los node IDs de PipeWire cambiaron tras un reinicio), se descarta
+/// el token y se reintenta con diálogo fresco — así el usuario obtiene los 3 monitores.
 pub async fn capture_via_screencast(
     restore_token: Option<String>,
 ) -> Result<(Vec<MonitorCapture>, Option<String>), CaptureError> {
+    let had_token = restore_token.is_some();
+    let (monitors, new_token, uncaptured) = capture_via_screencast_raw(restore_token).await?;
+
+    // Token stale detectado: el portal entregó streams que no produjeron frames.
+    // Esto ocurre cuando los PipeWire node IDs cambian (ej. reinicio) y el token
+    // apunta a nodos que ya no existen o tienen configuración incorrecta.
+    // Solución: reintentar sin token → portal muestra diálogo de selección fresco.
+    if !uncaptured.is_empty() && had_token {
+        eprintln!(
+            "[screencast] {} stream(s) sin frame con restore token — token stale, reintentando sin token",
+            uncaptured.len()
+        );
+        match capture_via_screencast_raw(None).await {
+            Ok((monitors2, new_token2, uncaptured2)) => {
+                if uncaptured2.is_empty() {
+                    eprintln!("[screencast] reintento sin token exitoso, {} monitor(s)", monitors2.len());
+                    return Ok((monitors2, new_token2));
+                }
+                eprintln!("[screencast] reintento sin token también tuvo {} uncaptured, usando gnome-crop", uncaptured2.len());
+                return apply_gnome_crop_fallback(monitors2, uncaptured2).await.map(|m| (m, new_token2));
+            }
+            Err(e) => {
+                eprintln!("[screencast] reintento sin token falló: {e}, usando resultado parcial con gnome-crop");
+            }
+        }
+    }
+
+    apply_gnome_crop_fallback(monitors, uncaptured).await.map(|m| (m, new_token))
+}
+
+/// Intento único de captura vía screencast. Retorna (monitores_capturados, token, uncaptured).
+/// No aplica fallback — permite al caller decidir si reintentar o usar gnome-crop.
+async fn capture_via_screencast_raw(
+    restore_token: Option<String>,
+) -> Result<(Vec<MonitorCapture>, Option<String>, Vec<(i32, i32, u32, u32)>), CaptureError> {
     use ashpd::desktop::screencast::{CursorMode, Screencast, SourceType};
     use ashpd::desktop::PersistMode;
 
@@ -408,14 +550,20 @@ pub async fn capture_via_screencast(
         })
         .collect();
 
-    let (mut monitors, uncaptured) = tokio::task::spawn_blocking(move || pipewire_capture_frames(fd, stream_info))
+    let (monitors, uncaptured) = tokio::task::spawn_blocking(move || pipewire_capture_frames(fd, stream_info))
         .await
         .map_err(|_| CaptureError::Capture("PipeWire thread panicked".to_string()))?
         .map_err(|e| CaptureError::Capture(format!("PipeWire capture: {e}")))?;
 
-    // Fallback para monitores que PipeWire no pudo capturar en sesiones multi-monitor.
-    // Usa gdbus Screenshot() completo + crop en memoria.
-    // ScreenshotArea() está prohibida para apps no-privilegiadas; Screenshot() sí funciona.
+    let _ = session.close().await;
+    Ok((monitors, new_token, uncaptured))
+}
+
+/// Aplica gnome-crop como fallback para streams que PipeWire no capturó.
+async fn apply_gnome_crop_fallback(
+    mut monitors: Vec<MonitorCapture>,
+    uncaptured: Vec<(i32, i32, u32, u32)>,
+) -> Result<Vec<MonitorCapture>, CaptureError> {
     for (x, y, w, h) in uncaptured {
         eprintln!("[screencast] fallback gnome-crop para monitor en ({x},{y})");
         match capture_area_via_gnome_crop(x, y, w, h).await {
@@ -426,9 +574,7 @@ pub async fn capture_via_screencast(
             Err(e) => eprintln!("[screencast] gnome-crop falló para ({x},{y}): {e}"),
         }
     }
-
-    let _ = session.close().await;
-    Ok((monitors, new_token))
+    Ok(monitors)
 }
 
 /// Fallback: captura el escritorio completo con gdbus Screenshot() y recorta la región
@@ -633,8 +779,13 @@ fn pipewire_capture_frames(
 
     let format_pod_bytes = make_video_format_pod();
 
-    // Guardamos streams y listeners para que no sean dropeados antes de mainloop.run()
+    // Guardamos streams y listeners para que no sean dropeados antes de mainloop.run().
     let mut _alive: Vec<Box<dyn std::any::Any>> = Vec::new();
+    // Punteros a los streams para el timer de retry. Son válidos mientras _alive viva.
+    let mut stream_ptrs: Vec<(usize, u32)> = Vec::new(); // (ptr as usize, node_id)
+    // Nodos que ya entraron en Streaming — el retry solo actúa sobre estos.
+    let streaming_nodes: Arc<Mutex<std::collections::HashSet<u32>>> =
+        Arc::new(Mutex::new(std::collections::HashSet::new()));
 
     for (node_id, stream_x, stream_y) in streams.iter().copied() {
         let state: Arc<Mutex<StreamCaptureState>> =
@@ -644,6 +795,7 @@ fn pipewire_capture_frames(
         let frames_clone = Arc::clone(&raw_frames);
         let sizes_clone = Arc::clone(&stream_sizes);
         let mainloop_clone = mainloop.clone();
+        let streaming_nodes_clone = Arc::clone(&streaming_nodes);
 
         let mut props = pipewire::properties::Properties::new();
         props.insert("media.type", "Video");
@@ -663,6 +815,7 @@ fn pipewire_capture_frames(
                 // justo tras set_active(true)), la transición es asíncrona y el request
                 // llega antes de que el stream esté listo, resultando en frames perdidos.
                 if new == StreamState::Streaming {
+                    streaming_nodes_clone.lock().unwrap().insert(node_id);
                     eprintln!("[pw] node={node_id} STREAMING → trigger_process()");
                     let _ = stream.trigger_process();
                 }
@@ -760,16 +913,51 @@ fn pipewire_capture_frames(
             )
             .map_err(|e| e.to_string())?;
 
-        _alive.push(Box::new((stream, listener)));
+        // Capturar el puntero al stream ANTES de moverlo al Box.
+        // El heap address del Box no cambia al moverse al Vec — solo se mueve el fat ptr.
+        // SAFETY: el Box vive en _alive durante todo mainloop.run().
+        let boxed = Box::new((stream, listener));
+        let stream_ptr = &boxed.0 as *const pipewire::stream::Stream as usize;
+        stream_ptrs.push((stream_ptr, node_id));
+        _alive.push(boxed);
     }
 
-    // Timeout de 10 segundos via el timer del event loop PipeWire
+    // Timer de retry: cada 200ms reintenta trigger_process() SOLO para nodos que:
+    //   1. Ya entraron en Streaming (set_active(true) completó la transición)
+    //   2. Aún no entregaron un frame
+    // Algunos nodos de PipeWire ignoran el primer trigger y responden al segundo.
+    // IMPORTANTE: NO llamar trigger_process en nodos Paused — puede enviarlos a Error.
+    let frames_for_retry = Arc::clone(&raw_frames);
+    let streaming_for_retry = Arc::clone(&streaming_nodes);
+    let ptrs_for_retry = stream_ptrs.clone();
+    let retry_timer = mainloop.loop_().add_timer(move |_| {
+        let frames = frames_for_retry.lock().unwrap();
+        let streaming = streaming_for_retry.lock().unwrap();
+        let to_retry: Vec<(usize, u32)> = ptrs_for_retry.iter()
+            .filter(|&&(_, nid)| streaming.contains(&nid) && !frames.contains_key(&nid))
+            .copied()
+            .collect();
+        drop(frames);
+        drop(streaming);
+        for (ptr, nid) in to_retry {
+            // SAFETY: el stream vive en _alive durante todo mainloop.run()
+            let stream = unsafe { &*(ptr as *const pipewire::stream::Stream) };
+            eprintln!("[pw] retry trigger_process() for node={nid}");
+            let _ = stream.trigger_process();
+        }
+    });
+    let _ = retry_timer.update_timer(
+        Some(std::time::Duration::from_millis(200)),
+        Some(std::time::Duration::from_millis(200)),
+    );
+
+    // Timeout total: si después de 3s algún stream sigue sin entregar, salir igualmente.
     let ml_timeout = mainloop.clone();
     let timer = mainloop.loop_().add_timer(move |_| {
         eprintln!("[pw] capture timeout — quitting");
         ml_timeout.quit();
     });
-    let _ = timer.update_timer(Some(std::time::Duration::from_secs(2)), None);
+    let _ = timer.update_timer(Some(std::time::Duration::from_secs(3)), None);
 
     mainloop.run();
 

@@ -35,6 +35,35 @@ pub fn clear_history(state: State<AppState>) -> Result<(), String> {
 
 // ─── Captura de área seleccionable ────────────────────────────────────────
 
+/// Fallback de captura Wayland usando PipeWire ScreenCast con restore token.
+/// Solo se usa cuando la captura vía GDK+desktop falla (entornos no estándar).
+async fn capture_screencast_fallback(app: &tauri::AppHandle) -> Vec<capture::MonitorCapture> {
+    let restore_token = {
+        let state = app.state::<AppState>();
+        state.db.lock().ok()
+            .and_then(|db| db::get_setting(&db, "screencast_restore_token").ok())
+            .flatten()
+    };
+    eprintln!("[screencast_fallback] restore_token={}", restore_token.is_some());
+
+    match capture::capture_via_screencast(restore_token).await {
+        Ok((monitors, new_token)) => {
+            if let Some(token) = new_token {
+                let state = app.state::<AppState>();
+                if let Ok(db) = state.db.lock() {
+                    let _ = db::set_setting(&db, "screencast_restore_token", &token);
+                    eprintln!("[screencast_fallback] restore token saved");
+                };
+            }
+            monitors
+        }
+        Err(e) => {
+            eprintln!("[screencast_fallback] screencast failed ({e}), trying capture_monitors_wayland");
+            capture::capture_monitors_wayland().await.unwrap_or_default()
+        }
+    }
+}
+
 /// Lógica compartida para iniciar la captura de área.
 /// Llamada tanto desde el shortcut global como desde el botón del frontend.
 pub(crate) fn show_capture_overlay(app: &tauri::AppHandle, from_tray: bool) {
@@ -207,38 +236,49 @@ pub(crate) fn show_capture_overlay(app: &tauri::AppHandle, from_tray: bool) {
                     tokio::time::sleep(std::time::Duration::from_millis(40)).await;
                 }
 
-                // Cargar restore token de la DB (permite captura silenciosa después
-                // del primer consentimiento).
-                let restore_token = {
-                    let state = app.state::<AppState>();
-                    state.db.lock().ok()
-                        .and_then(|db| db::get_setting(&db, "screencast_restore_token").ok())
-                        .flatten()
-                };
-                eprintln!("[show_overlay wayland] restore_token={:?}", restore_token.is_some());
+                // Obtener geometrías de monitores vía GDK (requiere GTK main thread).
+                let (geo_tx, geo_rx) = tokio::sync::oneshot::channel::<Vec<(i32, i32, u32, u32)>>();
+                #[cfg(target_os = "linux")]
+                if let Err(e) = app.run_on_main_thread(move || {
+                    let _ = geo_tx.send(get_gdk_monitor_geometries());
+                }) {
+                    eprintln!("[show_overlay wayland] run_on_main_thread geo: {e}");
+                }
+                let gdk_monitors = geo_rx.await.unwrap_or_default();
+                eprintln!("[show_overlay wayland] GDK: {} monitor(s): {:?}", gdk_monitors.len(), gdk_monitors);
 
-                // Intento 1: PipeWire ScreenCast (sin UI con restore token, con UI la primera vez)
-                let monitors = match capture::capture_via_screencast(restore_token).await {
-                    Ok((monitors, new_token)) => {
-                        // Persistir el nuevo token para la próxima captura
-                        if let Some(token) = new_token {
-                            let state = app.state::<AppState>();
-                            if let Ok(db) = state.db.lock() {
-                                let _ = db::set_setting(&db, "screencast_restore_token", &token);
-                                eprintln!("[show_overlay wayland] restore token saved");
-                            };
-                        }
-                        monitors
-                    }
-                    Err(e) => {
-                        eprintln!("[show_overlay wayland] screencast failed ({e}), trying fallbacks...");
-                        match capture::capture_monitors_wayland().await {
-                            Ok(m) => m,
-                            Err(e2) => {
-                                eprintln!("[show_overlay wayland] all capture methods failed: {e2}");
-                                return;
+                // Estrategia primaria: captura completa + split por monitor (sin PipeWire,
+                // sin tokens, sin diálogos — confiable en GNOME y wlroots).
+                let monitors = if !gdk_monitors.is_empty() {
+                    match capture::capture_full_desktop_wayland_bytes().await {
+                        Ok(bytes) => {
+                            match capture::split_image_by_monitors(&bytes, &gdk_monitors) {
+                                Ok(m) => {
+                                    eprintln!("[show_overlay wayland] split ok: {} monitor(s)", m.len());
+                                    m
+                                }
+                                Err(e) => {
+                                    eprintln!("[show_overlay wayland] split error: {e}, fallback screencast");
+                                    capture_screencast_fallback(&app).await
+                                }
                             }
                         }
+                        Err(e) => {
+                            eprintln!("[show_overlay wayland] full desktop failed: {e}, fallback screencast");
+                            capture_screencast_fallback(&app).await
+                        }
+                    }
+                } else {
+                    // Sin info GDK (entorno no estándar): usar PipeWire como antes.
+                    eprintln!("[show_overlay wayland] sin GDK monitors, usando screencast");
+                    capture_screencast_fallback(&app).await
+                };
+
+                let monitors = match monitors {
+                    m if !m.is_empty() => m,
+                    _ => {
+                        eprintln!("[show_overlay wayland] todos los métodos de captura fallaron");
+                        return;
                     }
                 };
 
@@ -352,6 +392,35 @@ pub(crate) fn show_capture_overlay(app: &tauri::AppHandle, from_tray: bool) {
             }
         }
     });
+}
+
+/// Retorna las geometrías de todos los monitores GDK en píxeles físicos: (x, y, w, h).
+/// Debe llamarse desde el GTK main thread.
+#[cfg(target_os = "linux")]
+fn get_gdk_monitor_geometries() -> Vec<(i32, i32, u32, u32)> {
+    let display = match gdk::Display::default() {
+        Some(d) => d,
+        None => { eprintln!("[gdk_geometries] no default GDK display"); return vec![]; }
+    };
+    let mut result = Vec::new();
+    for i in 0..display.n_monitors() {
+        if let Some(monitor) = display.monitor(i) {
+            let geo = monitor.geometry();
+            let scale = monitor.scale_factor();
+            eprintln!(
+                "[gdk_geometries] monitor[{i}]: pos=({},{}) size={}x{} scale={}",
+                geo.x(), geo.y(), geo.width(), geo.height(), scale
+            );
+            // GDK devuelve coordenadas lógicas; multiplicar por scale_factor da píxeles físicos.
+            result.push((
+                geo.x() * scale,
+                geo.y() * scale,
+                (geo.width() * scale) as u32,
+                (geo.height() * scale) as u32,
+            ));
+        }
+    }
+    result
 }
 
 /// Devuelve el índice GDK del monitor cuyas coordenadas coincidan con (target_x, target_y).
