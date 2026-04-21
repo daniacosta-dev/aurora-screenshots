@@ -829,8 +829,7 @@ pub fn show_main_window(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-/// Cierra (destruye) la ventana principal desde el frontend.
-/// Con ventanas lazy no hay razón para ocultarla — el tray la recreará cuando haga falta.
+/// Oculta la ventana principal desde el frontend.
 #[tauri::command]
 pub fn hide_main_window(app: tauri::AppHandle) -> Result<(), String> {
     if let Some(win) = app.get_webview_window("main") {

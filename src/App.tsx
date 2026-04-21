@@ -23,9 +23,9 @@ type AppView = "history" | "settings";
 function HistoryApp() {
   const { fetchHistory } = useHistoryStore();
   const [view, setView] = useState<AppView>("history");
-  // Mode is passed as a query param at window creation time — synchronous, no timing issues.
   const isFullscreen = new URLSearchParams(window.location.search).get("mode") === "fullscreen";
-  const hasFocused = useRef(false);
+  const lastMouseDown = useRef(0);
+  const closeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     fetchHistory();
@@ -33,16 +33,35 @@ function HistoryApp() {
     return () => { unlisten.then((fn) => fn()); };
   }, []);
 
-  // Close when window loses focus (after receiving focus at least once to avoid spurious close on show).
+  // Registrar el timestamp de cada mousedown en el panel.
+  // Clave para distinguir drag-start (mousedown propio) de click-afuera (no hay mousedown).
   useEffect(() => {
+    const onDown = () => { lastMouseDown.current = Date.now(); };
+    document.addEventListener("mousedown", onDown);
+    return () => document.removeEventListener("mousedown", onDown);
+  }, []);
+
+  // Auto-close al perder foco. Lógica: si el foco se perdió dentro de 150ms de un
+  // mousedown en el panel, es un drag-start → no cerrar. Si no hubo click reciente
+  // en el panel (click afuera, otra ventana tomó foco) → cerrar.
+  useEffect(() => {
+    let ready = false;
+    const readyTimer = setTimeout(() => { ready = true; }, 300);
+
     const unlisten = getCurrentWindow().onFocusChanged(({ payload: focused }) => {
       if (focused) {
-        hasFocused.current = true;
-      } else if (hasFocused.current) {
+        if (closeTimer.current !== null) {
+          clearTimeout(closeTimer.current);
+          closeTimer.current = null;
+        }
+      } else if (ready && Date.now() - lastMouseDown.current > 150) {
         invoke("hide_main_window");
       }
     });
-    return () => { unlisten.then((fn) => fn()); };
+    return () => {
+      clearTimeout(readyTimer);
+      unlisten.then((fn) => fn());
+    };
   }, []);
 
   useEffect(() => {
@@ -57,7 +76,9 @@ function HistoryApp() {
     <header
       className={`px-4 py-3 border-b border-gray-800 flex items-center justify-between flex-shrink-0${!isFullscreen ? " cursor-move" : ""}`}
       onMouseDown={(e) => {
-        if (!isFullscreen && e.target === e.currentTarget) getCurrentWindow().startDragging();
+        if (isFullscreen) return;
+        if ((e.target as HTMLElement).closest("button")) return;
+        getCurrentWindow().startDragging();
       }}
     >
       <div className="flex items-center gap-2">
