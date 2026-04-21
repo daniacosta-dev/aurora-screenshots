@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -23,60 +23,101 @@ type AppView = "history" | "settings";
 function HistoryApp() {
   const { fetchHistory } = useHistoryStore();
   const [view, setView] = useState<AppView>("history");
+  // Mode is passed as a query param at window creation time — synchronous, no timing issues.
+  const isFullscreen = new URLSearchParams(window.location.search).get("mode") === "fullscreen";
+  const hasFocused = useRef(false);
 
   useEffect(() => {
     fetchHistory();
-
-    const unlisten = listen("history-updated", () => {
-      fetchHistory();
-    });
-
-    return () => {
-      unlisten.then((fn) => fn());
-    };
+    const unlisten = listen("history-updated", () => fetchHistory());
+    return () => { unlisten.then((fn) => fn()); };
   }, []);
 
-  return (
-    // Backdrop fullscreen transparente — click fuera del panel cierra la ventana
-    <div
-      className="fixed inset-0 flex justify-end items-start p-4"
-      onContextMenu={(e) => e.preventDefault()}
-      onMouseDown={(e) => { if (e.target === e.currentTarget) invoke("hide_main_window"); }}
+  // Close when window loses focus (after receiving focus at least once to avoid spurious close on show).
+  useEffect(() => {
+    const unlisten = getCurrentWindow().onFocusChanged(({ payload: focused }) => {
+      if (focused) {
+        hasFocused.current = true;
+      } else if (hasFocused.current) {
+        invoke("hide_main_window");
+      }
+    });
+    return () => { unlisten.then((fn) => fn()); };
+  }, []);
+
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === "Escape") invoke("hide_main_window");
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, []);
+
+  const header = (
+    <header
+      className={`px-4 py-3 border-b border-gray-800 flex items-center justify-between flex-shrink-0${!isFullscreen ? " cursor-move" : ""}`}
+      onMouseDown={(e) => {
+        if (!isFullscreen && e.target === e.currentTarget) getCurrentWindow().startDragging();
+      }}
     >
-      <div className="w-[420px] h-[650px] flex flex-col bg-gray-950 text-gray-100 select-none rounded-xl shadow-2xl border border-gray-800/60 overflow-hidden">
-        <header
-          className="px-4 py-3 border-b border-gray-800 flex items-center justify-between flex-shrink-0"
-          style={{ cursor: "default" }}
-        >
-          <div className="flex items-center gap-2">
-            <img src="/aurora-screenshots-icon.svg" alt="" className="w-4 h-4" />
-            <h1 className="text-sm font-semibold text-gray-200 tracking-wide">
-              Aurora Screenshots
-            </h1>
-          </div>
-          <div className="flex items-center gap-2">
-            <button
-              onClick={() => setView(view === "settings" ? "history" : "settings")}
-              className={`w-6 h-6 flex items-center justify-center rounded transition-colors ${
-                view === "settings"
-                  ? "text-blue-400 bg-blue-400/10"
-                  : "text-gray-600 hover:text-gray-300 hover:bg-gray-800"
-              }`}
-              title="Settings"
-            >
-              <SettingsIcon size={13} />
-            </button>
-            <button
-              onClick={() => invoke("hide_main_window")}
-              className="text-gray-600 hover:text-gray-300 transition-colors w-6 h-6 flex items-center justify-center rounded hover:bg-gray-800"
-              title="Close"
-            >
-              <X size={13} />
-            </button>
-          </div>
-        </header>
-        {view === "history" ? <HistoryList /> : <Settings />}
+      <div className="flex items-center gap-2">
+        <img src="/aurora-screenshots-icon.svg" alt="" className="w-4 h-4" />
+        <h1 className="text-sm font-semibold text-gray-200 tracking-wide">
+          Aurora Screenshots
+        </h1>
       </div>
+      <div className="flex items-center gap-2">
+        <button
+          onClick={() => setView(view === "settings" ? "history" : "settings")}
+          className={`w-6 h-6 flex items-center justify-center rounded transition-colors ${
+            view === "settings"
+              ? "text-blue-400 bg-blue-400/10"
+              : "text-gray-600 hover:text-gray-300 hover:bg-gray-800"
+          }`}
+          title="Settings"
+        >
+          <SettingsIcon size={13} />
+        </button>
+        <button
+          onClick={() => invoke("hide_main_window")}
+          className="text-gray-600 hover:text-gray-300 transition-colors w-6 h-6 flex items-center justify-center rounded hover:bg-gray-800"
+          title="Close"
+        >
+          <X size={13} />
+        </button>
+      </div>
+    </header>
+  );
+
+  const panelContent = (
+    <>
+      {header}
+      {view === "history" ? <HistoryList /> : <Settings />}
+    </>
+  );
+
+  if (isFullscreen) {
+    // Fullscreen transparent window: panel is positioned top-right via CSS.
+    // Input region (set in Rust) makes the transparent area click-through.
+    return (
+      <div
+        className="fixed inset-0 flex justify-end items-start p-4"
+        onContextMenu={(e) => e.preventDefault()}
+      >
+        <div className="w-[440px] h-[680px] flex flex-col bg-gray-950 text-gray-100 select-none rounded-xl shadow-2xl border border-gray-800/60 overflow-hidden">
+          {panelContent}
+        </div>
+      </div>
+    );
+  }
+
+  // Fixed-size window: fills the whole window which is already the panel size.
+  return (
+    <div
+      className="w-full h-full flex flex-col bg-gray-950 text-gray-100 select-none rounded-xl shadow-2xl border border-gray-800/60 overflow-hidden"
+      onContextMenu={(e) => e.preventDefault()}
+    >
+      {panelContent}
     </div>
   );
 }

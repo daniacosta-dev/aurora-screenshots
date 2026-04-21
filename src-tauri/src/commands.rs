@@ -310,20 +310,18 @@ pub(crate) fn show_capture_overlay(app: &tauri::AppHandle, from_tray: bool) {
 
                 // Crear UNA ventana fullscreen por monitor y posicionarla con GTK.
                 //
-                // Estrategia: construir la ventana OCULTA, luego desde el main thread de GTK:
-                //   1. Encontrar el índice GDK del monitor por coordenadas.
-                //   2. Llamar GdkWindow::fullscreen_on_monitor(idx) — configura el estado
-                //      inicial antes del primer mapeo.
-                //   3. Llamar show() — el compositor recibe la ventana directamente como
-                //      "fullscreen on output X" sin transición de estado.
-                //
-                // Esto es más confiable que mostrar-primero-luego-mover porque el compositor
-                // ve la ventana como fullscreen desde su primer commit de superficie.
+                // Estrategia en dos fases para que todas las ventanas aparezcan simultáneamente:
+                //   Fase 1: crear todas las ventanas OCULTAS en secuencia.
+                //   Fase 2: una única llamada a run_on_main_thread muestra TODAS en el mismo
+                //           tick del GTK main loop — el compositor las recibe juntas.
+
+                // Fase 1: crear todas las ventanas ocultas.
+                let mut window_monitors: Vec<(tauri::WebviewWindow, i32, i32, usize)> = Vec::new();
                 for (i, monitor) in monitors.iter().enumerate() {
                     let label = format!("capture-overlay-{i}");
                     let mon_x = monitor.x;
                     let mon_y = monitor.y;
-                    let win = match tauri::WebviewWindowBuilder::new(
+                    match tauri::WebviewWindowBuilder::new(
                         &app,
                         &label,
                         tauri::WebviewUrl::App("index.html".into()),
@@ -332,61 +330,58 @@ pub(crate) fn show_capture_overlay(app: &tauri::AppHandle, from_tray: bool) {
                     .decorations(false)
                     .always_on_top(true)
                     .skip_taskbar(true)
-                    .visible(false)  // OCULTA: el compositor no la mapea todavía
+                    .visible(false)
                     .resizable(false)
                     .inner_size(monitor.width as f64, monitor.height as f64)
                     .build() {
-                        Ok(w) => w,
-                        Err(e) => {
-                            eprintln!("[show_overlay wayland] failed to create overlay-{i}: {e}");
-                            continue;
+                        Ok(w) => {
+                            eprintln!("[show_overlay wayland] created overlay-{i} at ({mon_x},{mon_y}) {}x{}", monitor.width, monitor.height);
+                            window_monitors.push((w, mon_x, mon_y, i));
                         }
-                    };
+                        Err(e) => eprintln!("[show_overlay wayland] failed to create overlay-{i}: {e}"),
+                    }
+                }
 
-                    // Breve pausa para que Tauri termine la inicialización del WebView
-                    // (realiza el GtkWindow internamente). Sin esto el gtk_window() call
-                    // podría fallar o devolver un estado incompleto.
-                    tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+                if window_monitors.is_empty() {
+                    eprintln!("[show_overlay wayland] no overlay windows created");
+                    return;
+                }
 
-                    // GTK/GDK SOLO pueden llamarse desde el hilo principal (GTK main loop).
-                    // Usamos gtk_window() directamente para show_all() — evita cualquier
-                    // indirección asíncrona de Tauri (idle_add etc.) y garantiza que
-                    // fullscreen + show ocurran en el mismo tick del GTK main loop.
-                    #[cfg(target_os = "linux")]
-                    {
-                        let win_clone = win.clone();
-                        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
-                        if let Err(e) = app.run_on_main_thread(move || {
-                            match win_clone.gtk_window() {
+                // Esperar a que todos los WebViews terminen de inicializarse antes de
+                // tocar GTK. Una sola pausa cubre todos los monitores a la vez.
+                tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+
+                // Fase 2: mostrar TODAS las ventanas en un único tick del GTK main loop
+                // para que el compositor las reciba simultáneamente.
+                #[cfg(target_os = "linux")]
+                {
+                    let wins: Vec<(tauri::WebviewWindow, i32, i32, usize)> = window_monitors.clone();
+                    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+                    if let Err(e) = app.run_on_main_thread(move || {
+                        for (win, mon_x, mon_y, i) in &wins {
+                            match win.gtk_window() {
                                 Ok(gtk_win) => {
-                                    // 1ª llamada: pre-mapeo — establece initial_fullscreen_monitor
-                                    //   en GtkWindow antes de que la ventana sea realizada.
-                                    fullscreen_on_gtk_window(&gtk_win, mon_x, mon_y);
-                                    // Mostrar la ventana — GTK la realiza y mapea aquí.
+                                    fullscreen_on_gtk_window(&gtk_win, *mon_x, *mon_y);
                                     gtk_win.show_all();
                                     eprintln!("[show_overlay wayland] show_all() for overlay-{i}");
-
-                                    // No usar post-map unfullscreen+fullscreen: causa animación
-                                    // visible y mueve la ventana del monitor correcto al
-                                    // incorrecto. El initial fullscreen_on_monitor + show_all()
-                                    // en el mismo tick ya funciona correctamente.
                                 }
-                                Err(e) => eprintln!("[show_overlay wayland] gtk_window() error: {e}"),
+                                Err(e) => eprintln!("[show_overlay wayland] gtk_window() error for overlay-{i}: {e}"),
                             }
-                            let _ = tx.send(());
-                        }) {
-                            eprintln!("[show_overlay wayland] run_on_main_thread error: {e}");
-                        } else {
-                            let _ = rx.await;
                         }
+                        let _ = tx.send(());
+                    }) {
+                        eprintln!("[show_overlay wayland] run_on_main_thread error: {e}");
+                    } else {
+                        let _ = rx.await;
                     }
+                }
 
-                    // Breve pausa para que el compositor procese el move antes de que el
-                    // frontend empiece a dibujar el fondo (evita que el canvas se inicialice
-                    // con las dimensiones del monitor equivocado).
-                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                // Pausa para que el compositor procese el mapeo inicial de todas las ventanas.
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
-                    eprintln!("[show_overlay wayland] overlay-{i} created for monitor at ({mon_x},{mon_y}) {}x{}", monitor.width, monitor.height);
+                // Notificar a todos los frontends simultáneamente.
+                for (win, mon_x, mon_y, i) in &window_monitors {
+                    eprintln!("[show_overlay wayland] emitting background-ready for overlay-{i} at ({mon_x},{mon_y})");
                     let _ = win.emit("background-ready", ());
                 }
             }
@@ -839,9 +834,14 @@ pub fn show_main_window(app: tauri::AppHandle) -> Result<(), String> {
 #[tauri::command]
 pub fn hide_main_window(app: tauri::AppHandle) -> Result<(), String> {
     if let Some(win) = app.get_webview_window("main") {
-        let _ = win.close();
+        let _ = win.hide();
     }
     Ok(())
+}
+
+#[tauri::command]
+pub fn get_history_window_mode(state: State<AppState>) -> &'static str {
+    if state.history_fullscreen { "fullscreen" } else { "panel" }
 }
 
 /// Retorna el screenshot del escritorio capturado antes de mostrar el overlay.

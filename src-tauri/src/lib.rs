@@ -13,12 +13,20 @@ use tauri::{
 };
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 
+#[cfg(target_os = "linux")]
+use gtk::prelude::{GtkWindowExt, WidgetExt};
+#[cfg(target_os = "linux")]
+use gdk::prelude::MonitorExt;
+
 pub const DEFAULT_CAPTURE_SHORTCUT: &str = "Ctrl+Shift+S";
 
 pub struct AppState {
     pub db: Mutex<rusqlite::Connection>,
     /// Display server detectado al inicio (X11 o Wayland). Inmutable después del setup.
     pub display_server: capture::DisplayServer,
+    /// True when the history window must be fullscreen (Wayland without layer-shell support).
+    /// Detected once at startup since it requires the GTK main thread.
+    pub history_fullscreen: bool,
     /// Origen del virtual desktop (min_x, min_y de todos los monitores).
     pub overlay_offset: Mutex<(i32, i32)>,
     /// Monitores capturados como JPEG individuales para el overlay (sin compositing en Rust).
@@ -60,9 +68,23 @@ pub fn run() {
                 .unwrap_or(capture::DisplayServer::X11);
             eprintln!("[init] display server: {:?}", display_server);
 
+            // Layer shell requires init_for_window() before the GTK window is realized.
+            // Tauri realizes the window during build() (WebView creation triggers realize),
+            // so by the time our run_on_main_thread callback runs it's too late. The window
+            // falls back to a plain xdg_toplevel at (0,0) and anchors have no effect.
+            // Solution: always use fullscreen+transparent on Wayland — the React component
+            // positions the panel at top-right via CSS, and input_shape_combine_region
+            // makes the transparent area click-through.
+            #[cfg(target_os = "linux")]
+            let history_fullscreen = display_server == capture::DisplayServer::Wayland;
+            #[cfg(not(target_os = "linux"))]
+            let history_fullscreen = false;
+            eprintln!("[init] history_fullscreen={history_fullscreen}");
+
             app.manage(AppState {
                 db: Mutex::new(conn),
                 display_server,
+                history_fullscreen,
                 overlay_offset: Mutex::new((0, 0)),
                 desktop_background: Mutex::new(None),
                 overlay_xid: Mutex::new(None),
@@ -90,6 +112,7 @@ pub fn run() {
             commands::close_capture_overlay,
             commands::show_main_window,
             commands::hide_main_window,
+            commands::get_history_window_mode,
             commands::get_capture_shortcut,
             commands::update_capture_shortcut,
             commands::pin_screenshot,
@@ -249,41 +272,166 @@ fn register_shortcut(app: &tauri::App, shortcut_str: &str) -> Result<(), Box<dyn
 }
 
 pub(crate) fn show_history_window(app: &tauri::AppHandle) {
-    // En Wayland set_position() es ignorado por el compositor.
-    // Usamos una ventana fullscreen transparente y posicionamos el panel
-    // en top-right via CSS — es el único enfoque que funciona sin layer-shell.
-    //
-    // El window se crea una vez y se reusa. fullscreen(true) en el builder
-    // garantiza que esté fullscreen antes del primer show().
-    let window = match app.get_webview_window("main") {
-        Some(w) => w,
-        None => {
-            match tauri::WebviewWindowBuilder::new(
-                app,
-                "main",
-                tauri::WebviewUrl::App("index.html".into()),
-            )
-            .transparent(true)
-            .decorations(false)
-            .fullscreen(true)
-            .always_on_top(true)
-            .skip_taskbar(true)
-            .visible(false)
-            .resizable(false)
-            .build()
-            {
-                Ok(w) => w,
-                Err(e) => {
-                    eprintln!("[show_history] failed to create window: {e}");
-                    return;
-                }
-            }
-        }
+    let state = app.state::<AppState>();
+    let display_server = state.display_server;
+    let history_fullscreen = state.history_fullscreen;
+    drop(state);
+
+    eprintln!("[show_history] display_server={display_server:?} history_fullscreen={history_fullscreen}");
+
+    // Window already exists (hidden after previous use) — just re-show it.
+    if let Some(window) = app.get_webview_window("main") {
+        eprintln!("[show_history] window already exists — re-showing");
+        let _ = window.show();
+        let _ = window.set_focus();
+        return;
+    }
+
+    eprintln!("[show_history] creating new window url=index.html{}",
+        if history_fullscreen { "?mode=fullscreen" } else { "" });
+
+    // First creation: build invisible, configure via GTK on the main thread, then show.
+    // For fullscreen (Wayland no layer-shell): do NOT set fullscreen(true) in the builder.
+    // Setting it here races with fullscreen_on_monitor() — the compositor sees two conflicting
+    // fullscreen requests and picks whichever monitor it likes. We let GTK own the fullscreen.
+    let url = if history_fullscreen {
+        tauri::WebviewUrl::App("index.html?mode=fullscreen".into())
+    } else {
+        tauri::WebviewUrl::App("index.html".into())
+    };
+    let window = match tauri::WebviewWindowBuilder::new(app, "main", url)
+        .transparent(true)
+        .decorations(false)
+        .always_on_top(true)
+        .skip_taskbar(true)
+        .visible(false)
+        .resizable(false)
+        .inner_size(440.0, 680.0)
+        .build()
+    {
+        Ok(w) => w,
+        Err(e) => { eprintln!("[show_history] build failed: {e}"); return; }
     };
 
-    let _ = window.set_always_on_top(true);
-    let _ = window.show();
-    let _ = window.set_focus();
-    let _ = window.set_always_on_top(false);
+    let win_clone = window.clone();
+    let _ = app.run_on_main_thread(move || {
+        #[cfg(target_os = "linux")]
+        match win_clone.gtk_window() {
+            Err(e) => {
+                eprintln!("[show_history] gtk_window() error: {e}");
+                let _ = win_clone.show();
+                let _ = win_clone.set_focus();
+            }
+            Ok(gtk_win) => {
+                eprintln!("[show_history] gtk_window OK, is_realized={}", gtk_win.is_realized());
+                if display_server == capture::DisplayServer::X11 {
+                    // RandR is the canonical source for the primary monitor; GDK's
+                    // primary_monitor() returns None on many setups (no primary set in xrandr),
+                    // which causes the fallback to monitor(0) — the wrong monitor.
+                    let pos = crate::x11_grab::get_primary_monitor_geometry()
+                        .or_else(|| {
+                            gdk::Display::default()
+                                .and_then(|d| d.primary_monitor().or_else(|| d.monitor(0)))
+                                .map(|m| {
+                                    let g = m.geometry();
+                                    (g.x(), g.y(), g.width(), g.height())
+                                })
+                        })
+                        .map(|(mx, my, mw, _mh)| (mx + mw - 440 - 16, my + 16));
+                    if let Some((x, y)) = pos {
+                        gtk_win.move_(x, y);
+                    }
+                    gtk_win.show_all();
+                    // x11rb move after show — window must be mapped for XID to be valid.
+                    if let Some((x, y)) = pos {
+                        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+                        let xid = win_clone.window_handle().ok().and_then(|h| {
+                            match h.as_raw() {
+                                RawWindowHandle::Xcb(h) => Some(h.window.get()),
+                                RawWindowHandle::Xlib(h) => Some(h.window as u32),
+                                _ => None,
+                            }
+                        });
+                        if let Some(xid) = xid {
+                            eprintln!("[show_history] x11rb move xid={xid} ({x},{y})");
+                            crate::x11_grab::move_window(xid, x, y);
+                        }
+                    }
+                } else if display_server == capture::DisplayServer::Wayland {
+                    // Log monitor layout for diagnostics.
+                    if let Some(d) = gdk::Display::default() {
+                        let n = d.n_monitors();
+                        eprintln!("[show_history] wayland: n_monitors={n} has_primary={}", d.primary_monitor().is_some());
+                        for i in 0..n {
+                            if let Some(m) = d.monitor(i) {
+                                let g = m.geometry();
+                                eprintln!("[show_history] monitor[{i}]: ({},{}) {}x{} model={:?}",
+                                    g.x(), g.y(), g.width(), g.height(), m.model());
+                            }
+                        }
+                    }
+                    // On GNOME Wayland, fullscreen_on_monitor() before show_all() has no effect —
+                    // the compositor needs a mapped xdg_surface before processing the request.
+                    // Call show_all() first, then fullscreen_on_monitor() targeting the primary monitor.
+                    // plain fullscreen() lets GNOME pick the focused/active monitor, which is wrong
+                    // on multi-monitor setups when triggered via tray/shortcut.
+                    gtk_win.show_all();
+                    {
+                        use gdk::glib::translate::ToGlibPtr;
+                        use gdk::prelude::{DeviceExt, SeatExt};
+                        let screen = gtk::prelude::WidgetExt::screen(&gtk_win);
+                        // Prefer the monitor under the cursor: triggers via tray/shortcut have
+                        // no focused window, so the cursor is the best proxy for "active monitor".
+                        // gdk_screen_get_monitor_at_point falls back to the nearest monitor edge.
+                        // Last resort: gdk_screen_get_primary_monitor, then 0 (leftmost).
+                        let monitor_num: i32 = screen.as_ref().and_then(|s| {
+                            let raw_s = s.to_glib_none().0;
+                            // Cursor position via default seat's pointer device.
+                            gdk::Display::default()
+                                .and_then(|d| d.default_seat())
+                                .and_then(|seat| seat.pointer())
+                                .map(|ptr| {
+                                    let (_scr, cx, cy) = ptr.position();
+                                    let idx = unsafe { gdk::ffi::gdk_screen_get_monitor_at_point(raw_s, cx, cy) };
+                                    eprintln!("[show_history] cursor=({cx},{cy}) monitor_at_point={idx}");
+                                    idx
+                                })
+                        }).unwrap_or_else(|| {
+                            screen.as_ref().map(|s| {
+                                let pm = unsafe { gdk::ffi::gdk_screen_get_primary_monitor(s.to_glib_none().0) };
+                                if pm >= 0 { pm } else { 0 }
+                            }).unwrap_or(0)
+                        });
+                        if let Some(s) = screen {
+                            gtk_win.fullscreen_on_monitor(&s, monitor_num);
+                            eprintln!("[show_history] fullscreen_on_monitor({})", monitor_num);
+                        } else {
+                            gtk_win.fullscreen();
+                            eprintln!("[show_history] fullscreen() fallback");
+                        }
+                    }
+
+                    // Input region is set dynamically once the compositor sends the fullscreen
+                    // configure event. size-allocate fires with the actual monitor dimensions.
+                    gtk_win.connect_size_allocate(|win, alloc| {
+                        if alloc.width() <= 800 { return; }
+                        let px = alloc.width() - 440 - 16;
+                        let py = 16;
+                        let rect = gdk::cairo::RectangleInt::new(px, py, 440, 680);
+                        let region = gdk::cairo::Region::create_rectangle(&rect);
+                        win.input_shape_combine_region(Some(&region));
+                        eprintln!("[show_history] input_region: ({px},{py}) size={}x{}",
+                            alloc.width(), alloc.height());
+                    });
+                }
+                let _ = win_clone.set_focus();
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = win_clone.show();
+            let _ = win_clone.set_focus();
+        }
+    });
 }
 

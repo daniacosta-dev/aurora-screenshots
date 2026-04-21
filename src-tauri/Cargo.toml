@@ -25,6 +25,7 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2", features = ["tray-icon", "image-png"] }
 gtk = { version = "0.18", features = ["v3_24"] }
+gtk-layer-shell = { version = "0.8", features = ["v0_5", "v0_6"] }
 gdk = "0.18"
 glib = "0.18"
 tauri-plugin-opener = "2"
@@ -43,7 +44,7 @@ thiserror = "1"
 arboard = "3"
 tokio = { version = "1", features = ["time", "process"] }
 resvg = "0.44"
-x11rb = "0.13"
+x11rb = { version = "0.13", features = ["randr"] }
 raw-window-handle = "0.6"
 pipewire = { version = "0.8", features = ["v0_3_34"] }
 
